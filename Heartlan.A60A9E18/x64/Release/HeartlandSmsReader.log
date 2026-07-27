@@ -1,3 +1,0 @@
-﻿  HeartlandSmsReader.cpp
-C:\Users\Owner\Desktop\Heartland-SMS-Reader-WORKING\HeartlandSmsReader.cpp(825,31): error C3861: 'WriteOutputsAndLaunch': identifier not found
-C:\Users\Owner\Desktop\Heartland-SMS-Reader-WORKING\HeartlandSmsReader.cpp(665,1): error C1075: '{': no matching token found

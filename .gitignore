@@ -1,0 +1,21 @@
+# Visual Studio build output
+x64/
+Debug/
+Release/
+
+# Visual Studio user files
+*.user
+*.VC.db
+*.VC.opendb
+
+# Build artifacts
+*.obj
+*.pdb
+*.ilk
+*.ipch
+*.idb
+*.tlog
+
+# Temporary files
+*.log
+*.tmp
