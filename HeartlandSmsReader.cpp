@@ -9,6 +9,7 @@
 #include <comutil.h>
 #include "Logger.h"
 #include "PduDecoder.h"
+#include "MessageStore.h"
 
 #include <algorithm>
 #include <atomic>
@@ -805,6 +806,18 @@ int wmain(int argc, wchar_t* argv[])
     std::wcout << L"Heartland SMS Hub - continuous read-only monitor\n\n";
     std::wcout << L"This program reads stored SMS messages, decodes them,\n"
                << L"monitors for new messages, and serves the inbox on port 8080.\n\n";
+
+    MessageStore messageStore;
+    if (messageStore.Open(L"C:\\HeartlandData\\sms.db"))
+    {
+        std::wcout << L"Database ready: C:\\HeartlandData\\sms.db\n\n";
+    }
+    else
+    {
+        std::wcerr << L"WARNING: Could not open database: "
+                   << messageStore.LastError() << L"\n"
+                   << L"Continuing without database storage.\n\n";
+    }
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr))
