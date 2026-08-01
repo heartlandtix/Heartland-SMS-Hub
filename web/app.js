@@ -319,10 +319,12 @@ async function loadInbox() {
 
     status.textContent = "Connected";
     render();
+    return true;
   } catch (error) {
     status.textContent = "Disconnected";
     list.innerHTML = `<div class="error">Could not load inbox: ${safe(error.message)}</div>`;
     count.textContent = "Inbox unavailable";
+    return false;
   }
 }
 
@@ -367,5 +369,20 @@ codesOnly.addEventListener("click", () => {
   render();
 });
 
-loadInbox().then(checkForInboxUpdate);
-setInterval(checkForInboxUpdate, 1500);
+async function startUp() {
+  // Keep retrying the initial load until it actually succeeds. Without
+  // this, if the backend isn't ready yet the instant the page loads
+  // (very common right after starting the servers), the page would
+  // show "Disconnected" forever and never automatically recover.
+  let connected = await loadInbox();
+
+  while (!connected) {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    connected = await loadInbox();
+  }
+
+  await checkForInboxUpdate();
+  setInterval(checkForInboxUpdate, 1500);
+}
+
+startUp();

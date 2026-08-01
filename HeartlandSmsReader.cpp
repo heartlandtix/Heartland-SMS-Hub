@@ -733,6 +733,27 @@ static void RunHttpServer(
             continue;
         }
 
+        // Some browsers open a speculative connection to a site before
+        // actually requesting a page, and may send no data on it for a
+        // while. Without a timeout, this server (which only handles one
+        // connection at a time) would sit frozen waiting on that single
+        // connection, blocking every other request behind it. A short
+        // timeout means a connection like that gets skipped instead of
+        // stalling the whole server.
+        DWORD socketTimeoutMs = 3000;
+        setsockopt(
+            client,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            reinterpret_cast<const char*>(&socketTimeoutMs),
+            sizeof(socketTimeoutMs));
+        setsockopt(
+            client,
+            SOL_SOCKET,
+            SO_SNDTIMEO,
+            reinterpret_cast<const char*>(&socketTimeoutMs),
+            sizeof(socketTimeoutMs));
+
         char requestBuffer[4096]{};
         int received = recv(
             client,
@@ -740,8 +761,17 @@ static void RunHttpServer(
             static_cast<int>(sizeof(requestBuffer) - 1),
             0);
 
-        std::string request =
-            received > 0 ? std::string(requestBuffer, received) : std::string();
+        if (received <= 0)
+        {
+            // Timed out or the connection closed with no data (e.g. a
+            // speculative preconnect). Nothing to respond to - just
+            // close it and move on to the next connection.
+            shutdown(client, SD_BOTH);
+            closesocket(client);
+            continue;
+        }
+
+        std::string request = std::string(requestBuffer, received);
 
         std::string body;
         std::string contentType;
