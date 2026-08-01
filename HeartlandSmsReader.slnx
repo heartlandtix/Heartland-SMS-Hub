@@ -3,9 +3,6 @@
     <BuildType Name="Release" />
     <Platform Name="x64" />
   </Configurations>
-  <Folder Name="/Solution Items/">
-    <File Path="sqlite3.c" />
-    <File Path="sqlite3.h" />
-  </Folder>
+  <Folder Name="/Solution Items/" />
   <Project Path="HeartlandSmsReader.vcxproj" Id="a60a9e18-4ce8-4c70-be95-08ed233f7d71" />
 </Solution>

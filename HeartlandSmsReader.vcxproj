@@ -67,12 +67,14 @@
   <ItemGroup>
     <ClCompile Include="HeartlandSmsReader.cpp" />
     <ClCompile Include="Logger.cpp" />
+    <ClCompile Include="MessageStore.cpp" />
     <ClCompile Include="PduDecoder.cpp" />
     <ClCompile Include="SmsService.cpp" />
     <ClCompile Include="sqlite3.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Logger.h" />
+    <ClInclude Include="MessageStore.h" />
     <ClInclude Include="PduDecoder.h" />
     <ClInclude Include="SmsService.h" />
     <ClInclude Include="sqlite3.h" />

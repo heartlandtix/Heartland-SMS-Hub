@@ -12,6 +12,7 @@
       <Filter>Services</Filter>
     </ClCompile>
     <ClCompile Include="sqlite3.c" />
+    <ClCompile Include="MessageStore.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="SmsService.h">
@@ -24,6 +25,7 @@
       <Filter>Services</Filter>
     </ClInclude>
     <ClInclude Include="sqlite3.h" />
+    <ClInclude Include="MessageStore.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Services">
