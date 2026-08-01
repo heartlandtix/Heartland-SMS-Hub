@@ -811,6 +811,30 @@ int wmain(int argc, wchar_t* argv[])
     if (messageStore.Open(L"C:\\HeartlandData\\sms.db"))
     {
         std::wcout << L"Database ready: C:\\HeartlandData\\sms.db\n\n";
+
+        // ---- TEMPORARY TEST INSERT (remove once confirmed working) ----
+        DecodedSms testMessage;
+        testMessage.messageType = L"TEST";
+        testMessage.sender = L"TEST-SENDER";
+        testMessage.timestamp = L"2026-07-31T00:00:00";
+        testMessage.text = L"This is a manual test row, not a real SMS.";
+        testMessage.encoding = L"TEST";
+
+        bool testInserted = messageStore.InsertMessage(
+            999999,
+            0,
+            L"TEST-PDU-DO-NOT-USE",
+            testMessage);
+
+        std::wcout << L"TEST INSERT result: "
+                   << (testInserted ? L"inserted new row" : L"already existed or failed")
+                   << L"\n";
+
+        if (!messageStore.LastError().empty())
+        {
+            std::wcerr << L"TEST INSERT error: " << messageStore.LastError() << L"\n";
+        }
+        // ---- END TEMPORARY TEST INSERT ----
     }
     else
     {
@@ -1050,6 +1074,19 @@ int wmain(int argc, wchar_t* argv[])
                            << L"From: " << DisplayAddress(decoded) << L"\n"
                            << L"Time: " << decoded.timestamp << L"\n"
                            << L"Text: " << decoded.text << L"\n";
+
+                if (!messageStore.InsertMessage(
+                        message.index,
+                        message.status,
+                        message.pdu,
+                        decoded))
+                {
+                    if (!messageStore.LastError().empty())
+                    {
+                        std::wcerr << L"Database insert warning: "
+                                   << messageStore.LastError() << L"\n";
+                    }
+                }
             }
         }
 
