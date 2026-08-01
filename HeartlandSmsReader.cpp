@@ -65,6 +65,18 @@ public:
         return value;
     }
 
+    // Windows broadcasts SMS read-complete events to every listener,
+    // not just the one that issued a particular read request - other
+    // software on this PC (e.g. Skylight) reading SMS at the same time
+    // can otherwise be mistaken for our own request completing. Once
+    // we know which request id SmsRead() gave us, we ignore every
+    // event that isn't a response to that specific request.
+    void SetExpectedRequestId(ULONG requestId)
+    {
+        expectedRequestId_ = requestId;
+        hasExpectedRequestId_ = true;
+    }
+
     STDMETHODIMP OnSmsConfigurationChange(IMbnSms*) override
     {
         return S_OK;
@@ -96,8 +108,15 @@ public:
         ULONG requestID,
         HRESULT status) override
     {
-        UNREFERENCED_PARAMETER(requestID);
         std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!hasExpectedRequestId_ || requestID != expectedRequestId_)
+        {
+            // This completion belongs to some other program's SMS read
+            // request (or arrived before we knew our own request id) -
+            // not ours. Ignore it and keep waiting for our own.
+            return S_OK;
+        }
 
         if (FAILED(status))
         {
@@ -212,6 +231,8 @@ private:
     bool complete_ = false;
     HRESULT finalStatus_ = E_PENDING;
     std::vector<RawMessage> messages_;
+    ULONG expectedRequestId_ = 0;
+    bool hasExpectedRequestId_ = false;
 };
 
 
@@ -582,6 +603,8 @@ static bool ReadMessagesOnce(
 
     if (SUCCEEDED(hr))
     {
+        sink->SetExpectedRequestId(requestId);
+
         if (!sink->Wait(90000))
         {
             hr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
@@ -598,6 +621,39 @@ static bool ReadMessagesOnce(
 
     finalStatus = hr;
     return SUCCEEDED(hr);
+}
+
+// Wraps ReadMessagesOnce with a few retries. Reads occasionally fail
+// with a transient error when this program's read request collides
+// with another program (e.g. Skylight) reading SMS storage at the
+// same moment - retrying a moment later usually succeeds.
+static bool ReadMessagesWithRetries(
+    IMbnSms* sms,
+    IConnectionPoint* smsConnectionPoint,
+    std::vector<SmsEventSink::RawMessage>& messages,
+    HRESULT& finalStatus,
+    int maxAttempts,
+    DWORD retryDelayMs,
+    const wchar_t* contextLabel)
+{
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+    {
+        if (ReadMessagesOnce(sms, smsConnectionPoint, messages, finalStatus))
+        {
+            return true;
+        }
+
+        std::wcerr << contextLabel << L" attempt " << attempt << L" of "
+                   << maxAttempts << L" failed: " << HresultText(finalStatus)
+                   << L"\n";
+
+        if (attempt < maxAttempts)
+        {
+            Sleep(retryDelayMs);
+        }
+    }
+
+    return false;
 }
 
 
@@ -973,9 +1029,11 @@ int wmain(int argc, wchar_t* argv[])
 
     std::wcout << L"Reading current SMS inbox...\n";
 
-    if (!ReadMessagesOnce(sms, smsConnectionPoint, messages, readStatus))
+    if (!ReadMessagesWithRetries(
+            sms, smsConnectionPoint, messages, readStatus,
+            4, 2000, L"Initial SMS read"))
     {
-        std::wcerr << L"Initial SMS read failed: "
+        std::wcerr << L"Initial SMS read failed after 4 attempts: "
                    << HresultText(readStatus) << L"\n";
         CoUninitialize();
         return 7;
@@ -1013,6 +1071,21 @@ int wmain(int argc, wchar_t* argv[])
                << messages.size() << L"\n";
     std::wcout << L"Waiting for Windows SMS status-change events.\n"
                << L"Press Q in this console to stop.\n";
+
+    // Watchdog: periodically prove to ourselves that the modem
+    // connection is still genuinely responsive, rather than passively
+    // hoping an event eventually arrives. If several checks in a row
+    // fail, this program has likely gone stale (seen tonight as long
+    // stretches of total silence despite real texts arriving) - in
+    // that case, exit with a distinct code so the launcher can restart
+    // this program automatically, rather than requiring a manual fix.
+    const ULONGLONG healthCheckIntervalMs = 5ULL * 60ULL * 1000ULL; // 5 minutes
+    const int maxHealthCheckFailures = 2;
+    const int watchdogExitCode = 42;
+
+    ULONGLONG lastHealthCheckTick = GetTickCount64();
+    int healthCheckFailureStreak = 0;
+    bool watchdogTriggered = false;
 
     std::atomic_bool stopRequested = false;
     std::thread serverThread(
@@ -1054,6 +1127,37 @@ int wmain(int argc, wchar_t* argv[])
         CComPtr<IMbnSms> changedSms;
         if (!statusSink->WaitForChange(500, changedSms))
         {
+            if (GetTickCount64() - lastHealthCheckTick >= healthCheckIntervalMs)
+            {
+                lastHealthCheckTick = GetTickCount64();
+
+                std::vector<SmsEventSink::RawMessage> healthMessages;
+                HRESULT healthStatus = E_PENDING;
+
+                if (ReadMessagesWithRetries(
+                        sms, smsConnectionPoint, healthMessages, healthStatus,
+                        2, 2000, L"Health check"))
+                {
+                    healthCheckFailureStreak = 0;
+                }
+                else
+                {
+                    ++healthCheckFailureStreak;
+                    std::wcerr << L"Health check failed (" << healthCheckFailureStreak
+                               << L" of " << maxHealthCheckFailures
+                               << L" allowed): " << HresultText(healthStatus) << L"\n";
+
+                    if (healthCheckFailureStreak >= maxHealthCheckFailures)
+                    {
+                        std::wcerr << L"Modem connection appears stuck. "
+                                   << L"Exiting so the launcher can restart this program.\n";
+                        watchdogTriggered = true;
+                        stopRequested.store(true);
+                        break;
+                    }
+                }
+            }
+
             continue;
         }
 
@@ -1063,11 +1167,9 @@ int wmain(int argc, wchar_t* argv[])
         std::vector<SmsEventSink::RawMessage> latestMessages;
         HRESULT latestStatus = E_PENDING;
 
-        if (!ReadMessagesOnce(
-                changedSms,
-                smsConnectionPoint,
-                latestMessages,
-                latestStatus))
+        if (!ReadMessagesWithRetries(
+                changedSms, smsConnectionPoint, latestMessages, latestStatus,
+                4, 1500, L"Event refresh"))
         {
             SYSTEMTIME now{};
             GetLocalTime(&now);
@@ -1077,13 +1179,16 @@ int wmain(int argc, wchar_t* argv[])
                        << std::setw(2) << now.wHour << L":"
                        << std::setw(2) << now.wMinute << L":"
                        << std::setw(2) << now.wSecond
-                       << L"  Event refresh FAILED: "
+                       << L"  Event refresh FAILED after 4 attempts: "
                        << HresultText(latestStatus)
                        << L" (0x" << std::hex << std::uppercase
                        << static_cast<unsigned long>(latestStatus)
                        << std::dec << L")\n";
             continue;
         }
+
+        healthCheckFailureStreak = 0;
+        lastHealthCheckTick = GetTickCount64();
 
         size_t newCount = 0;
 
@@ -1142,5 +1247,5 @@ int wmain(int argc, wchar_t* argv[])
     statusSink->Release();
 
     CoUninitialize();
-    return 0;
+    return watchdogTriggered ? watchdogExitCode : 0;
 }
