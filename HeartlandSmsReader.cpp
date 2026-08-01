@@ -215,6 +215,18 @@ private:
 };
 
 
+static void LogSmsEvent(const wchar_t* eventName)
+{
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+
+    std::wcout << std::setfill(L'0')
+               << L"\n[" << std::setw(2) << now.wHour << L":"
+               << std::setw(2) << now.wMinute << L":"
+               << std::setw(2) << now.wSecond
+               << L"] SMS EVENT FIRED: " << eventName << L"\n";
+}
+
 class SmsStatusSink final : public IMbnSmsEvents
 {
 public:
@@ -249,17 +261,21 @@ public:
 
     STDMETHODIMP OnSmsConfigurationChange(IMbnSms*) override
     {
+        LogSmsEvent(L"OnSmsConfigurationChange");
         return S_OK;
     }
 
     STDMETHODIMP OnSetSmsConfigurationComplete(
         IMbnSms*, ULONG, HRESULT) override
     {
+        LogSmsEvent(L"OnSetSmsConfigurationComplete");
         return S_OK;
     }
 
     STDMETHODIMP OnSmsStatusChange(IMbnSms* sms) override
     {
+        LogSmsEvent(L"OnSmsStatusChange");
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             changedSms_ = sms;
@@ -273,6 +289,7 @@ public:
     STDMETHODIMP OnSmsSendComplete(
         IMbnSms*, ULONG, HRESULT) override
     {
+        LogSmsEvent(L"OnSmsSendComplete");
         return S_OK;
     }
 
@@ -280,18 +297,21 @@ public:
         IMbnSms*, MBN_SMS_FORMAT, SAFEARRAY*,
         VARIANT_BOOL, ULONG, HRESULT) override
     {
+        LogSmsEvent(L"OnSmsReadComplete");
         return S_OK;
     }
 
     STDMETHODIMP OnSmsDeleteComplete(
         IMbnSms*, ULONG, HRESULT) override
     {
+        LogSmsEvent(L"OnSmsDeleteComplete");
         return S_OK;
     }
 
     STDMETHODIMP OnSmsNewClass0Message(
         IMbnSms*, MBN_SMS_FORMAT, SAFEARRAY*) override
     {
+        LogSmsEvent(L"OnSmsNewClass0Message");
         return S_OK;
     }
 
