@@ -1,0 +1,40 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="HeartlandSmsReader.cpp" />
+    <ClCompile Include="SmsService.cpp">
+      <Filter>Services</Filter>
+    </ClCompile>
+    <ClCompile Include="PduDecoder.cpp">
+      <Filter>Decoders</Filter>
+    </ClCompile>
+    <ClCompile Include="HttpServer.cpp">
+      <Filter>Services</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="SmsService.h">
+      <Filter>Services</Filter>
+    </ClInclude>
+    <ClInclude Include="PduDecoder.h">
+      <Filter>Decoders</Filter>
+    </ClInclude>
+    <ClInclude Include="HttpServer.h">
+      <Filter>Services</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Services">
+      <UniqueIdentifier>{59e1d82a-8bc8-4d42-8be3-bf159f15e71e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Decoders">
+      <UniqueIdentifier>{52fe9d65-6f60-44eb-8156-aee130a64be5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI">
+      <UniqueIdentifier>{1c89c2a3-2499-44bf-836a-2496334dd5e2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Models">
+      <UniqueIdentifier>{96ca3647-2daa-491b-b601-e1f69d834fa6}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -114,15 +114,8 @@ std::wstring DecodeTimestamp(const Bytes& b,size_t pos)
     if(pos+7>b.size()) return L"";
     int yy=SwapDecimal(b[pos]), mon=SwapDecimal(b[pos+1]), day=SwapDecimal(b[pos+2]);
     int hour=SwapDecimal(b[pos+3]), minute=SwapDecimal(b[pos+4]), second=SwapDecimal(b[pos+5]);
-    std::uint8_t tz = b[pos + 6];
-
-    bool negative = (tz & 0x08) != 0;
-
-    // Clear the sign bit before decoding the swapped decimal.
-    tz &= 0xF7;
-
-    int quarters = SwapDecimal(tz);
-    int mins = quarters * 15;
+    std::uint8_t tz=b[pos+6]; bool negative=(tz&0x08)!=0;
+    int quarters=(tz&0x07)*10+((tz>>4)&0x0F); int mins=quarters*15;
     std::wostringstream s; s<<std::setfill(L'0')<<std::setw(4)<<(2000+yy)<<L'-'<<std::setw(2)<<mon<<L'-'<<std::setw(2)<<day<<L' '<<std::setw(2)<<hour<<L':'<<std::setw(2)<<minute<<L':'<<std::setw(2)<<second<<L' '<<(negative?L'-':L'+')<<std::setw(2)<<(mins/60)<<L':'<<std::setw(2)<<(mins%60);
     return s.str();
 }

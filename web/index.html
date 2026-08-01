@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Heartland SMS Hub</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Heartland SMS Inbox</h1>
+      <div id="count" class="count">Loading inbox…</div>
+    </div>
+    <div id="status" class="status">Connecting…</div>
+  </header>
+
+  <section class="toolbar">
+    <input id="search" type="search" placeholder="Search sender, message, URL, or code">
+    <select id="direction">
+      <option value="all">All messages</option>
+      <option value="SMS-DELIVER">Incoming</option>
+      <option value="SMS-SUBMIT">Outgoing</option>
+    </select>
+    <select id="sort">
+      <option value="newest">Newest first</option>
+      <option value="oldest">Oldest first</option>
+      <option value="index">Modem index</option>
+    </select>
+    <button id="codesOnly" type="button">Codes only: Off</button>
+  </section>
+
+  <main class="layout">
+    <section id="list" class="list">
+      <div class="empty">Loading inbox…</div>
+    </section>
+
+    <section id="detail" class="detail">
+      <div class="empty">Select a message.</div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -8,6 +8,9 @@
     <ClCompile Include="PduDecoder.cpp">
       <Filter>Decoders</Filter>
     </ClCompile>
+    <ClCompile Include="Logger.cpp">
+      <Filter>Services</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="SmsService.h">
@@ -15,6 +18,9 @@
     </ClInclude>
     <ClInclude Include="PduDecoder.h">
       <Filter>Decoders</Filter>
+    </ClInclude>
+    <ClInclude Include="Logger.h">
+      <Filter>Services</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -30,5 +36,16 @@
     <Filter Include="Models">
       <UniqueIdentifier>{96ca3647-2daa-491b-b601-e1f69d834fa6}</UniqueIdentifier>
     </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="web\index.html">
+      <Filter>UI</Filter>
+    </Text>
+    <Text Include="web\styles.css">
+      <Filter>UI</Filter>
+    </Text>
+    <Text Include="web\app.js">
+      <Filter>UI</Filter>
+    </Text>
   </ItemGroup>
 </Project>

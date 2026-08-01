@@ -1,21 +1,32 @@
-# Visual Studio build output
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.ipch
+
+# Build output
 x64/
 Debug/
 Release/
 
-# Visual Studio user files
-*.user
-*.VC.db
-*.VC.opendb
+# Node
+server/node_modules/
 
-# Build artifacts
-*.obj
-*.pdb
-*.ilk
-*.ipch
-*.idb
-*.tlog
+# Database
+*.db
+*.sqlite
+*.sqlite3
 
-# Temporary files
+# Environment
+.env
+
+# Logs
 *.log
+
+# Temporary
 *.tmp
+
+# Zip archives
+*.zip
