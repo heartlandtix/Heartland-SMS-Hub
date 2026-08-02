@@ -11,9 +11,16 @@ start "Heartland SMS Reader" cmd /k "Run-Reader-Loop.bat"
 echo Waiting for the SMS reader to start up...
 timeout /t 5 /nobreak >nul
 
-REM --- Start the Node server in its own window ---
+REM --- Start the Node server ---
+REM Uses the bundled portable Node runtime if it exists (deployment
+REM machines), otherwise falls back to a normal system-wide "node"
+REM command (this dev PC, which has Node installed the regular way).
 cd /d "%~dp0server"
-start "Heartland Node Server" cmd /k "node index.js"
+if exist "%~dp0node-runtime\node.exe" (
+    start "Heartland Node Server" cmd /k ""%~dp0node-runtime\node.exe"" index.js"
+) else (
+    start "Heartland Node Server" cmd /k "node index.js"
+)
 
 echo Waiting for the Node server to start up...
 timeout /t 3 /nobreak >nul

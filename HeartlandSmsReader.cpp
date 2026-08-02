@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <fcntl.h>
 #include <fstream>
+#include <io.h>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -899,6 +901,15 @@ static void RunHttpServer(
 
 int wmain(int argc, wchar_t* argv[])
 {
+    // When this program's output is redirected into a log file (as it
+    // is when running invisibly in the background) instead of a real
+    // console window, std::wcout can otherwise silently produce NO
+    // output at all - this forces it to actually write correctly
+    // either way, so the log files are genuinely useful for checking
+    // on a hidden/background instance.
+    _setmode(_fileno(stdout), _O_U8TEXT);
+    _setmode(_fileno(stderr), _O_U8TEXT);
+
     bool openBrowser = true;
 
     for (int i = 1; i < argc; ++i)
