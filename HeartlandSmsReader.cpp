@@ -565,9 +565,14 @@ static std::string BuildMessagesJson(
     return json.str();
 }
 
+// Identifies a message by its actual content, not its storage slot
+// number. The SIM can reassign slot numbers when messages are deleted
+// (e.g. by another program like Skylight reading and clearing its own
+// copy) - if the slot number were part of this key, the exact same
+// unchanged message could suddenly look "new" again after a shuffle.
 static std::wstring MessageKey(const SmsEventSink::RawMessage& message)
 {
-    return std::to_wstring(message.index) + L"|" + message.pdu;
+    return message.pdu;
 }
 
 static bool ReadMessagesOnce(
@@ -1090,8 +1095,8 @@ int wmain(int argc, wchar_t* argv[])
     // stretches of total silence despite real texts arriving) - in
     // that case, exit with a distinct code so the launcher can restart
     // this program automatically, rather than requiring a manual fix.
-    const ULONGLONG healthCheckIntervalMs = 5ULL * 60ULL * 1000ULL; // 5 minutes
-    const int maxHealthCheckFailures = 2;
+    const ULONGLONG healthCheckIntervalMs = 2ULL * 60ULL * 1000ULL; // 2 minutes
+    const int maxHealthCheckFailures = 1;
     const int watchdogExitCode = 42;
 
     ULONGLONG lastHealthCheckTick = GetTickCount64();

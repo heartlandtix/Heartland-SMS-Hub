@@ -153,12 +153,14 @@ bool MessageStore::InsertMessage(
     const std::wstring address =
         !decoded.sender.empty() ? decoded.sender : decoded.recipient;
 
-    // The unique key identifies "this exact message, on this exact
-    // device". Combining device id + modem index + raw PDU means a
-    // message already stored will never be inserted twice, even if
-    // the program restarts and re-reads the modem's inbox.
+    // The unique key identifies "this exact message content, on this
+    // exact device" - deliberately NOT including modemIndex. The SIM
+    // can reassign storage slot numbers when messages are deleted (by
+    // this program or another one like Skylight), so an unchanged
+    // message could otherwise get a new modem_index and be wrongly
+    // treated as a brand new message, re-inserted and re-emailed.
     std::wstringstream keyStream;
-    keyStream << deviceId_ << L"|" << modemIndex << L"|" << rawPdu;
+    keyStream << deviceId_ << L"|" << rawPdu;
     const std::wstring messageKey = keyStream.str();
 
     static const char* insertSql =

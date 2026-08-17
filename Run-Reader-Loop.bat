@@ -1,8 +1,12 @@
 @echo off
+setlocal enabledelayedexpansion
+
 REM %~dp0 is this script's own folder, whatever that happens to be on
 REM this particular machine - makes this work no matter which account
 REM name or drive it's copied to.
 cd /d "%~dp0"
+
+set "WWAN_RETRY_DONE=0"
 
 :loop
 echo Starting Heartland SMS Reader...
@@ -15,8 +19,23 @@ if %EXITCODE%==42 (
     echo The program's own health check found it had gone stale and asked
     echo to be restarted. Restarting automatically in 3 seconds...
     echo.
+    set "WWAN_RETRY_DONE=0"
     timeout /t 3 /nobreak >nul
     goto loop
+)
+
+if %EXITCODE%==7 (
+    if "!WWAN_RETRY_DONE!"=="0" (
+        echo.
+        echo Even a fresh restart of this program could not reach the modem.
+        echo This can happen when the Windows service that manages the
+        echo modem gets stuck. Attempting to restart that service now...
+        echo.
+        schtasks /run /tn "Heartland Restart WWAN Service" >nul 2>nul
+        timeout /t 10 /nobreak >nul
+        set "WWAN_RETRY_DONE=1"
+        goto loop
+    )
 )
 
 echo.

@@ -100,10 +100,22 @@ function sendMessageEmail(message) {
     return;
   }
 
-  const subject = `New SMS from ${message.address || "Unknown"}`;
+  // "SMS-DELIVER" is a message this machine received; anything else
+  // (e.g. "SMS-SUBMIT") is a message this machine sent out - same
+  // distinction the web inbox already shows as an Incoming/Outgoing
+  // badge.
+  const isIncoming = message.message_type === "SMS-DELIVER";
+  const direction = isIncoming ? "Received" : "Sent";
+  const addressLabel = isIncoming ? "From" : "To";
+
+  const subject = isIncoming
+    ? `New SMS from ${message.address || "Unknown"}`
+    : `Sent SMS to ${message.address || "Unknown"}`;
+
   const body =
     `Device: ${message.device_id || "Unknown"}\n` +
-    `From: ${message.address || "Unknown"}\n` +
+    `Direction: ${direction}\n` +
+    `${addressLabel}: ${message.address || "Unknown"}\n` +
     `Time: ${message.timestamp_original || "Unknown"}\n\n` +
     `${message.text || message.error || "(no text)"}\n`;
 
