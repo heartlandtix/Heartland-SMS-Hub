@@ -24,7 +24,19 @@ if %EXITCODE%==42 (
     goto loop
 )
 
-if %EXITCODE%==7 (
+REM Exit code 7 = "even a fresh restart couldn't reach the modem" (the
+REM program's own clean error path). Exit code -1073741819 has also
+REM been observed in the wild for the exact same underlying cause
+REM (the WWAN AutoConfig service not running) - confirmed by
+REM deliberately stopping that service and watching this exact code
+REM appear, right after "Could not enumerate mobile broadband
+REM interfaces: The service has not been started." Treating both the
+REM same way, since they share the same real-world cause and fix.
+if %EXITCODE%==7 set "TRY_WWAN_FIX=1"
+if %EXITCODE%==-1073741819 set "TRY_WWAN_FIX=1"
+
+if defined TRY_WWAN_FIX (
+    set "TRY_WWAN_FIX="
     if "!WWAN_RETRY_DONE!"=="0" (
         echo.
         echo Even a fresh restart of this program could not reach the modem.
