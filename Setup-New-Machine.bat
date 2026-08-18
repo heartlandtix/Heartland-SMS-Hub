@@ -47,22 +47,38 @@ powercfg /setdcvalueindex SCHEME_CURRENT 4f971e89-eebd-4455-a8de-9e59040e7347 5c
 
 powercfg /setactive SCHEME_CURRENT
 
-REM --- 3. Schedule two daily restarts, as a safety net in case the ---
-REM ---    sleep settings above don't fully prevent the problem on  ---
-REM ---    every machine - a restart reliably fixes it, and this    ---
-REM ---    program auto-starts again on its own after any restart.  ---
+REM --- 3. Scheduled restarts - now an A/B choice ---
+REM We're comparing whether the WWAN auto-recovery fix alone is
+REM enough, or whether scheduled restarts are still worth the
+REM (real) cost of occasionally causing their own connectivity gap.
 echo.
-echo Scheduling daily restarts ^(midnight and 7 AM^)...
+echo ============================================================
+echo  Scheduled Restart Policy ^(A/B comparison^)
+echo ============================================================
+echo.
+echo We're comparing two approaches across the fleet:
+echo   A - Restart twice daily ^(midnight and 7 AM^) as a safety net
+echo   B - No scheduled restarts - rely only on the automatic WWAN
+echo       service recovery fix instead
+echo.
+set /p RESTART_CHOICE=Enable scheduled restarts on THIS machine? (Y/N):
+
 schtasks /delete /tn "Heartland Restart - Midnight" /f >nul 2>nul
 schtasks /delete /tn "Heartland Restart - 7AM" /f >nul 2>nul
 
-schtasks /create /tn "Heartland Restart - Midnight" ^
-    /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
-    /sc daily /st 00:00 /rl highest /f
+if /i "%RESTART_CHOICE%"=="Y" (
+    echo Group A ^(restarts enabled^) - set on %date% %time% > "C:\HeartlandData\restart-policy.txt"
 
-schtasks /create /tn "Heartland Restart - 7AM" ^
-    /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
-    /sc daily /st 07:00 /rl highest /f
+    schtasks /create /tn "Heartland Restart - Midnight" ^
+        /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
+        /sc daily /st 00:00 /rl highest /f
+
+    schtasks /create /tn "Heartland Restart - 7AM" ^
+        /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
+        /sc daily /st 07:00 /rl highest /f
+) else (
+    echo Group B ^(no scheduled restarts^) - set on %date% %time% > "C:\HeartlandData\restart-policy.txt"
+)
 
 REM --- 3b. Check for internet connectivity 5 minutes after every ---
 REM      login, and auto-restart (up to 3 times) if none is found. ---
@@ -131,6 +147,16 @@ powershell -NoProfile -Command ^
     "$sc.WorkingDirectory = '%PROJECT_DIR%';" ^
     "$sc.Save()"
 
+REM --- 7b. Register the WWAN service auto-restart as a pre-authorized ---
+REM ---     task, so the program can trigger it later without needing  ---
+REM ---     admin rights each time it's needed. ---
+echo.
+echo Registering WWAN service auto-recovery...
+schtasks /delete /tn "Heartland Restart WWAN Service" /f >nul 2>nul
+schtasks /create /tn "Heartland Restart WWAN Service" ^
+    /tr "\"%PROJECT_DIR%Restart-WWAN-Service.bat\"" ^
+    /sc once /st 00:00 /sd 01/01/2099 /rl highest /f
+
 REM --- 8. Set up auto-login for THIS machine's account ---
 echo.
 echo ============================================================
@@ -156,11 +182,11 @@ echo ============================================================
 echo  Setup complete.
 echo ============================================================
 echo.
-echo This PC will restart automatically at 12:00 AM and 7:00 AM every
-echo day, in addition to booting straight to the desktop with no
-echo prompts after any restart or power loss. It will also check for
-echo internet connectivity 5 minutes after every login and
-echo auto-restart (up to 3 times) if none is found.
+echo This PC will boot straight to the desktop with no prompts after
+echo any restart or power loss. It will also check for internet
+echo connectivity 5 minutes after every login and auto-restart (up to
+echo 3 times) if none is found, and will automatically recover from a
+echo stuck modem connection on its own.
 echo.
 echo Restart this PC now to test: it should boot straight to the
 echo desktop, and Heartland SMS Hub should start automatically and
