@@ -24,20 +24,18 @@ if "%EXITCODE%"=="42" (
     goto loop
 )
 
-REM Exit code 7 = "even a fresh restart couldn't reach the modem" (the
-REM program's own clean error path). Exit code -1073741819 has also
-REM been observed in the wild for the exact same underlying cause
-REM (the WWAN AutoConfig service not running) - confirmed by
-REM deliberately stopping that service and watching this exact code
-REM appear. Treating both the same way, since they share the same
-REM real-world cause and fix. Both sides of these comparisons are
-REM quoted deliberately - IF can otherwise mishandle a value starting
-REM with a minus sign.
-set "TRY_WWAN_FIX="
-if "%EXITCODE%"=="7" set "TRY_WWAN_FIX=1"
-if "%EXITCODE%"=="-1073741819" set "TRY_WWAN_FIX=1"
-
-if defined TRY_WWAN_FIX (
+REM ANY exit code other than 0 (a normal, intentional quit) or 42
+REM (already handled above) is treated as worth one attempt at the
+REM WWAN service recovery fix. Every real-world failure code we've
+REM seen so far (5, 7, and the -1073741819 crash code) has turned out
+REM to trace back to the same underlying cause - the WWAN AutoConfig
+REM service. Rather than chase each new exact code as it turns up in
+REM the field, we just try the fix for any unexpected failure. If the
+REM real cause is something else entirely (e.g. no modem hardware at
+REM all), this costs one harmless ~25 second delay before still
+REM correctly giving up and showing the real error - not a real risk,
+REM since at most one retry ever happens per run either way.
+if not "%EXITCODE%"=="0" (
     if "!WWAN_RETRY_DONE!"=="0" (
         echo.
         echo Even a fresh restart of this program could not reach the modem.
@@ -45,7 +43,9 @@ if defined TRY_WWAN_FIX (
         echo modem gets stuck. Attempting to restart that service now...
         echo.
         schtasks /run /tn "Heartland Restart WWAN Service" >nul 2>nul
-        timeout /t 10 /nobreak >nul
+        REM Give Windows extra time to actually re-register the modem
+        REM as an available interface after the service comes back up.
+        timeout /t 25 /nobreak >nul
         set "WWAN_RETRY_DONE=1"
         goto loop
     )
