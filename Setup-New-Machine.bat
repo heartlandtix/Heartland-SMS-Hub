@@ -5,12 +5,31 @@ REM This script sets up Heartland SMS Hub on a new machine. Run it once,
 REM from wherever this whole folder has been copied to - it figures out
 REM its own location automatically, so the folder can live anywhere.
 
+REM --- 0. Confirm this is actually running as Administrator ---
+REM Several steps below (registry, Defender exclusions, scheduled
+REM tasks) silently fail with no visible error if this script isn't
+REM elevated - this check stops that from happening unnoticed.
+net session >nul 2>nul
+if not "%errorlevel%"=="0" (
+    echo ============================================================
+    echo  ERROR: This script is NOT running as Administrator.
+    echo ============================================================
+    echo.
+    echo Several setup steps will silently fail without this - close
+    echo this window, then right-click Setup-New-Machine.bat and
+    echo choose "Run as administrator" instead.
+    echo.
+    pause
+    exit /b 1
+)
+
 set "PROJECT_DIR=%~dp0"
 
 echo ============================================================
 echo  Heartland SMS Hub - New Machine Setup
 echo ============================================================
 echo.
+echo Running as Administrator: confirmed.
 echo This folder: %PROJECT_DIR%
 echo.
 
@@ -72,10 +91,12 @@ if /i "%RESTART_CHOICE%"=="Y" (
     schtasks /create /tn "Heartland Restart - Midnight" ^
         /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
         /sc daily /st 00:00 /rl highest /f
+    if errorlevel 1 echo WARNING: Could not create the midnight restart task - see above.
 
     schtasks /create /tn "Heartland Restart - 7AM" ^
         /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
         /sc daily /st 07:00 /rl highest /f
+    if errorlevel 1 echo WARNING: Could not create the 7 AM restart task - see above.
 ) else (
     echo Group B ^(no scheduled restarts^) - set on %date% %time% > "C:\HeartlandData\restart-policy.txt"
 )
@@ -88,6 +109,7 @@ schtasks /delete /tn "Heartland Connectivity Check" /f >nul 2>nul
 schtasks /create /tn "Heartland Connectivity Check" ^
     /tr "\"%PROJECT_DIR%Check-Internet-Connectivity.bat\"" ^
     /sc onlogon /delay 0005:00 /rl highest /f
+if errorlevel 1 echo WARNING: Could not create the connectivity check task - see above.
 
 REM --- 4. Exclude our folders from Windows Defender ---
 REM Defender can flag this program as a false-positive "trojan" and
@@ -102,6 +124,7 @@ powershell -NoProfile -Command ^
     "Add-MpPreference -ExclusionPath 'C:\HeartlandData';" ^
     "Add-MpPreference -ExclusionPath ([System.Environment]::GetFolderPath('UserProfile') + '\Downloads');" ^
     "Add-MpPreference -ExclusionProcess 'HeartlandSmsReader.exe'"
+if errorlevel 1 echo WARNING: Could not add Defender exclusions - see above.
 
 REM --- 5. Install the Visual C++ Redistributable, which the compiled ---
 REM ---    program needs to run at all. Safe to run even if it's      ---
@@ -156,6 +179,11 @@ schtasks /delete /tn "Heartland Restart WWAN Service" /f >nul 2>nul
 schtasks /create /tn "Heartland Restart WWAN Service" ^
     /tr "\"%PROJECT_DIR%Restart-WWAN-Service.bat\"" ^
     /sc once /st 00:00 /sd 01/01/2099 /rl highest /f
+if errorlevel 1 (
+    echo WARNING: Could not register WWAN auto-recovery - see above.
+) else (
+    echo WWAN auto-recovery registered successfully.
+)
 
 REM --- 8. Set up auto-login for THIS machine's account ---
 echo.
@@ -187,6 +215,9 @@ echo any restart or power loss. It will also check for internet
 echo connectivity 5 minutes after every login and auto-restart (up to
 echo 3 times) if none is found, and will automatically recover from a
 echo stuck modem connection on its own.
+echo.
+echo If any WARNING lines appeared above, re-run this script as
+echo Administrator to fix them before considering setup complete.
 echo.
 echo Restart this PC now to test: it should boot straight to the
 echo desktop, and Heartland SMS Hub should start automatically and
