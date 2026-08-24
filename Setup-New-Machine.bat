@@ -89,12 +89,12 @@ if /i "%RESTART_CHOICE%"=="Y" (
     echo Group A ^(restarts enabled^) - set on %date% %time% > "C:\HeartlandData\restart-policy.txt"
 
     schtasks /create /tn "Heartland Restart - Midnight" ^
-        /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
+        /tr "\"%PROJECT_DIR%Scheduled-Restart.bat\"" ^
         /sc daily /st 00:00 /rl highest /f
     if errorlevel 1 echo WARNING: Could not create the midnight restart task - see above.
 
     schtasks /create /tn "Heartland Restart - 7AM" ^
-        /tr "shutdown /r /t 60 /c \"Heartland scheduled restart\"" ^
+        /tr "\"%PROJECT_DIR%Scheduled-Restart.bat\"" ^
         /sc daily /st 07:00 /rl highest /f
     if errorlevel 1 echo WARNING: Could not create the 7 AM restart task - see above.
 ) else (

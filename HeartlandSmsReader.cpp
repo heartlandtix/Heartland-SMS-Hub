@@ -238,13 +238,24 @@ private:
 };
 
 
+static const wchar_t* DayOfWeekName(WORD dayOfWeek)
+{
+    static const wchar_t* names[] =
+        { L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat" };
+    return (dayOfWeek <= 6) ? names[dayOfWeek] : L"???";
+}
+
 static void LogSmsEvent(const wchar_t* eventName)
 {
     SYSTEMTIME now{};
     GetLocalTime(&now);
 
     std::wcout << std::setfill(L'0')
-               << L"\n[" << std::setw(2) << now.wHour << L":"
+               << L"\n[" << DayOfWeekName(now.wDayOfWeek) << L" "
+               << now.wYear << L"-"
+               << std::setw(2) << now.wMonth << L"-"
+               << std::setw(2) << now.wDay << L" "
+               << std::setw(2) << now.wHour << L":"
                << std::setw(2) << now.wMinute << L":"
                << std::setw(2) << now.wSecond
                << L"] SMS EVENT FIRED: " << eventName << L"\n";
@@ -1191,7 +1202,10 @@ int wmain(int argc, wchar_t* argv[])
             GetLocalTime(&now);
 
             std::wcerr << std::setfill(L'0')
-                       << L"\n"
+                       << L"\n" << DayOfWeekName(now.wDayOfWeek) << L" "
+                       << now.wYear << L"-"
+                       << std::setw(2) << now.wMonth << L"-"
+                       << std::setw(2) << now.wDay << L" "
                        << std::setw(2) << now.wHour << L":"
                        << std::setw(2) << now.wMinute << L":"
                        << std::setw(2) << now.wSecond
