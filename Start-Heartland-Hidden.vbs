@@ -30,7 +30,7 @@ Sub RotateLogIfOld(logPath, maxAgeDays)
         If DateDiff("d", logFile.DateCreated, Now) > maxAgeDays Then
             archivePath = Replace(logPath, ".log", "-previous.log")
             On Error Resume Next
-            If fso.FileExists(archivePath) Then fso.DeleteFile(archivePath, True)
+            If fso.FileExists(archivePath) Then fso.DeleteFile archivePath, True
             fso.MoveFile logPath, archivePath
             On Error Goto 0
         End If
