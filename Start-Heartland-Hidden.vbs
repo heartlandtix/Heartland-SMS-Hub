@@ -15,25 +15,58 @@ If Not fso.FolderExists(logFolder) Then
 End If
 
 ' --- Log rotation: archive any log file older than 2 weeks ---
-' Runs once per restart/login (not on every internal auto-restart
-' within Run-Reader-Loop.bat's own loop), so today's data is never
-' touched mid-day - only genuinely old data gets rotated. Rather than
-' deleting the old file outright, it's renamed to "-previous.log" -
-' this means there's NEVER a moment with zero recent history, since
-' the prior ~2 weeks is still sitting right there even the instant
-' after a rotation happens. Only the period before that (over a
-' month old) actually gets discarded, when the next rotation replaces
-' whatever "-previous" file was there before.
+' Runs once per restart/login. Rather than deleting the old file
+' outright, it's renamed to "-previous.log" - so there's NEVER a
+' moment with zero recent history.
+'
+' This deliberately does NOT use the log file's own creation date to
+' decide whether it's old enough to rotate. Windows can "tunnel" a
+' recreated file's timestamp - if a file is renamed away and a new
+' file with the SAME name is created again shortly after (exactly
+' what rotation does), Windows can silently give that "new" file the
+' OLD file's original creation date instead of today's. That would
+' make every single restart think the fresh file was already weeks
+' old, rotating it again immediately and wiping out whatever had just
+' been saved into "-previous" - which is exactly what was observed in
+' the field. Instead, a small separate marker file tracks the real
+' rotation date ourselves, sidestepping the whole issue.
 Sub RotateLogIfOld(logPath, maxAgeDays)
-    If fso.FileExists(logPath) Then
-        Set logFile = fso.GetFile(logPath)
-        If DateDiff("d", logFile.DateCreated, Now) > maxAgeDays Then
-            archivePath = Replace(logPath, ".log", "-previous.log")
-            On Error Resume Next
-            If fso.FileExists(archivePath) Then fso.DeleteFile archivePath, True
-            fso.MoveFile logPath, archivePath
-            On Error Goto 0
+    markerPath = logPath & ".rotated-on"
+    needsRotate = False
+
+    If fso.FileExists(markerPath) Then
+        Set markerFile = fso.OpenTextFile(markerPath, 1)
+        markerDateStr = ""
+        If Not markerFile.AtEndOfStream Then
+            markerDateStr = markerFile.ReadLine()
         End If
+        markerFile.Close
+
+        markerDate = Now
+        On Error Resume Next
+        markerDate = CDate(markerDateStr)
+        On Error Goto 0
+
+        If DateDiff("d", markerDate, Now) > maxAgeDays Then
+            needsRotate = True
+        End If
+    End If
+    ' If no marker exists yet, this is the first time rotation has
+    ' ever run for this log - don't rotate immediately, just start
+    ' tracking from today.
+
+    If needsRotate And fso.FileExists(logPath) Then
+        archivePath = Replace(logPath, ".log", "-previous.log")
+        On Error Resume Next
+        If fso.FileExists(archivePath) Then fso.DeleteFile archivePath, True
+        fso.MoveFile logPath, archivePath
+        On Error Goto 0
+    End If
+
+    If needsRotate Or Not fso.FileExists(markerPath) Then
+        Set markerFile = fso.CreateTextFile(markerPath, True)
+        markerFile.WriteLine CStr(Now)
+        markerFile.Close
     End If
 End Sub
 
