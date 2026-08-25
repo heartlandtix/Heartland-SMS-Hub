@@ -926,6 +926,21 @@ int wmain(int argc, wchar_t* argv[])
     _setmode(_fileno(stdout), _O_U8TEXT);
     _setmode(_fileno(stderr), _O_U8TEXT);
 
+    // When output is redirected to a file (as it is when running
+    // invisibly in the background) rather than a real console, the
+    // system quietly switches to holding output in memory and only
+    // actually writing it to disk once that buffer fills up or the
+    // program exits - not after every line, the way a real console
+    // behaves. Since this program runs indefinitely, that means the
+    // log file could sit essentially empty for the program's entire
+    // healthy lifetime, only actually showing content once something
+    // eventually makes it exit. This forces every line to be written
+    // out immediately, regardless of whether it's a console or a
+    // redirected file, so the log is genuinely useful to check while
+    // the program is still running normally.
+    std::wcout << std::unitbuf;
+    std::wcerr << std::unitbuf;
+
     bool openBrowser = true;
 
     for (int i = 1; i < argc; ++i)
