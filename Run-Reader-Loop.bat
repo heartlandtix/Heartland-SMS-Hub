@@ -8,6 +8,7 @@ cd /d "%~dp0"
 
 set "WWAN_RETRY_COUNT=0"
 set "MAX_WWAN_RETRIES=10"
+set "LOG_FILE=C:\HeartlandData\logs\wwan-restart.log"
 
 :loop
 echo Starting Heartland SMS Reader...
@@ -27,19 +28,16 @@ if "%EXITCODE%"=="42" (
 
 REM ANY exit code other than 0 (a normal, intentional quit) or 42
 REM (already handled above) is treated as worth an attempt at the
-REM WWAN service recovery fix. Every real-world failure code we've
-REM seen so far has traced back to the same underlying cause - the
-REM WWAN AutoConfig service.
+REM lightweight WWAN service recovery fix first, since it's fast and
+REM doesn't take the machine offline. Up to 10 attempts are allowed.
 REM
-REM Up to 10 attempts are allowed - deliberately generous. Each
-REM attempt only costs about 30 seconds and never touches a PC
-REM restart (unlike a more aggressive fallback we considered and
-REM decided against, since a couple of machines are known to
-REM sometimes lose connectivity after an actual reboot). Since we
-REM don't know the "right" number of retries needed in every case,
-REM and this lightweight fix has no real downside to trying more,
-REM a generous count means we're very unlikely to need to bump this
-REM again after seeing one more unusual case in the field.
+REM If even 10 lightweight attempts genuinely aren't enough - proven
+REM to happen in the field (Mark, Dave, the dev PC all hit this same
+REM crash and exhausted every lightweight retry) - we escalate to a
+REM full PC restart as the final fallback. A full restart has a 100%
+REM track record of clearing this exact issue every time it's been
+REM needed. This means the system never just gives up and sits
+REM broken waiting for someone to notice.
 if not "%EXITCODE%"=="0" (
     if !WWAN_RETRY_COUNT! LSS %MAX_WWAN_RETRIES% (
         set /a WWAN_RETRY_COUNT+=1
@@ -54,6 +52,15 @@ if not "%EXITCODE%"=="0" (
         REM as an available interface after the service comes back up.
         timeout /t 25 /nobreak >nul
         goto loop
+    ) else (
+        echo.
+        echo The lightweight fix didn't work after %MAX_WWAN_RETRIES% tries.
+        echo Restarting this whole PC as a last resort - this has reliably
+        echo cleared this issue every time it's been needed.
+        echo.
+        echo %date% %time% - Lightweight WWAN fix failed after %MAX_WWAN_RETRIES% attempts. Restarting the whole PC. >> "%LOG_FILE%"
+        shutdown /r /t 30 /c "Heartland: recovering from a stuck modem connection"
+        exit /b 0
     )
 )
 
