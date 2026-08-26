@@ -66,40 +66,16 @@ powercfg /setdcvalueindex SCHEME_CURRENT 4f971e89-eebd-4455-a8de-9e59040e7347 5c
 
 powercfg /setactive SCHEME_CURRENT
 
-REM --- 3. Scheduled restarts - now an A/B choice ---
-REM We're comparing whether the WWAN auto-recovery fix alone is
-REM enough, or whether scheduled restarts are still worth the
-REM (real) cost of occasionally causing their own connectivity gap.
-echo.
-echo ============================================================
-echo  Scheduled Restart Policy ^(A/B comparison^)
-echo ============================================================
-echo.
-echo We're comparing two approaches across the fleet:
-echo   A - Restart twice daily ^(midnight and 7 AM^) as a safety net
-echo   B - No scheduled restarts - rely only on the automatic WWAN
-echo       service recovery fix instead
-echo.
-set /p RESTART_CHOICE=Enable scheduled restarts on THIS machine? (Y/N):
-
+REM --- Scheduled restarts removed. The WWAN auto-recovery fix (10
+REM     lightweight attempts, then a full PC restart if that's
+REM     genuinely not enough) has proven to reliably self-heal the
+REM     modem connection on its own. Scheduled restarts also carried
+REM     a real, separate risk on some machines - occasionally causing
+REM     a connectivity loss of their own after restarting - so they're
+REM     no longer part of setup at all.
 schtasks /delete /tn "Heartland Restart - Midnight" /f >nul 2>nul
 schtasks /delete /tn "Heartland Restart - 7AM" /f >nul 2>nul
-
-if /i "%RESTART_CHOICE%"=="Y" (
-    echo Group A ^(restarts enabled^) - set on %date% %time% > "C:\HeartlandData\restart-policy.txt"
-
-    schtasks /create /tn "Heartland Restart - Midnight" ^
-        /tr "\"%PROJECT_DIR%Scheduled-Restart.bat\"" ^
-        /sc daily /st 00:00 /rl highest /f
-    if errorlevel 1 echo WARNING: Could not create the midnight restart task - see above.
-
-    schtasks /create /tn "Heartland Restart - 7AM" ^
-        /tr "\"%PROJECT_DIR%Scheduled-Restart.bat\"" ^
-        /sc daily /st 07:00 /rl highest /f
-    if errorlevel 1 echo WARNING: Could not create the 7 AM restart task - see above.
-) else (
-    echo Group B ^(no scheduled restarts^) - set on %date% %time% > "C:\HeartlandData\restart-policy.txt"
-)
+if exist "C:\HeartlandData\restart-policy.txt" del "C:\HeartlandData\restart-policy.txt" >nul 2>nul
 
 REM --- 3b. Check for internet connectivity 5 minutes after every ---
 REM      login, and auto-restart (up to 3 times) if none is found. ---
