@@ -1203,15 +1203,23 @@ int wmain(int argc, wchar_t* argv[])
             continue;
         }
 
-        // Give Windows and the modem a moment to finish storing the message.
-        Sleep(1000);
+        // No artificial delay here on purpose - a full second of
+        // waiting was giving Skylight (which appears to read and then
+        // delete new messages almost immediately) a head start, letting
+        // it sometimes remove a message from the SIM before we ever
+        // got a chance to read it, so it never appeared in our results.
+        // The retry logic just below (4 attempts, 1.5s apart) already
+        // provides the same "let things settle" cushion this delay
+        // used to give, so removing it doesn't lose that protection -
+        // it just removes an unnecessary head start for whoever else
+        // is racing to read the same message first.
 
         std::vector<SmsEventSink::RawMessage> latestMessages;
         HRESULT latestStatus = E_PENDING;
 
         if (!ReadMessagesWithRetries(
                 changedSms, smsConnectionPoint, latestMessages, latestStatus,
-                4, 1500, L"Event refresh"))
+                4, 750, L"Event refresh"))
         {
             SYSTEMTIME now{};
             GetLocalTime(&now);

@@ -4,12 +4,15 @@ const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const sqlite3 = require("sqlite3").verbose();
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
 const app = express();
 const PORT = 3000;
 const SMS_READER_URL = "http://127.0.0.1:8080";
 const DB_PATH = "C:\\HeartlandData\\sms.db";
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 1000;
 
 // ---------------------------------------------------------------------
 // Every log line below goes through these instead of plain
@@ -209,3 +212,204 @@ function checkForNewMessages() {
 }
 
 setInterval(checkForNewMessages, POLL_INTERVAL_MS);
+
+// ---------------------------------------------------------------------
+// Skylight cross-check (redundancy safety net).
+//
+// Skylight keeps its own separate record of every SMS it sees, in a
+// plain XML file. Occasionally Skylight reads AND deletes a brand new
+// message off the SIM within roughly a second of it arriving - fast
+// enough that our own reader sometimes never gets a chance to read it
+// at all, even though Skylight itself has a copy the whole time.
+//
+// This periodically reads Skylight's own inbox file, compares it
+// against what's already in OUR database, and for anything Skylight
+// has that we're missing, inserts it directly into our own database -
+// which then flows through the exact same "new row -> send email"
+// mechanism above automatically, no separate email-sending code
+// needed here at all.
+// ---------------------------------------------------------------------
+
+const SKYLIGHT_INBOX_PATH = path.join(
+  process.env.APPDATA || "",
+  "Sierra Wireless",
+  "Skylight",
+  "RWInbox.xml"
+);
+const SKYLIGHT_CHECK_INTERVAL_MS = 1000; // 1 second - both files/database confirmed tiny, so no real cost to checking this often
+
+const deviceId = os.hostname();
+
+// A second, separate, WRITABLE connection to the same database - kept
+// apart from the read-only one above so this new feature can never
+// accidentally affect the already-proven email-alert path.
+const writableDb = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE, (err) => {
+  if (err) {
+    logError(`Skylight cross-check: could not open database for writing:`, err.message);
+  } else {
+    log(`Skylight cross-check: watching ${SKYLIGHT_INBOX_PATH}`);
+  }
+});
+
+function xmlUnescape(value) {
+  return (value || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// Reduces any phone number format to its last 10 digits, so
+// "+15203908115", "15203908115", and "5203908115" all compare equal.
+// Short codes (e.g. "38263") are left as-is since they're already short.
+function normalizePhone(address) {
+  const digits = (address || "").replace(/\D/g, "");
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function normalizeText(text) {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+
+// Skylight timestamps look like "26/6/25 8:1:48:168" - YY/M/D H:M:S:MS,
+// no leading zeros. Converts to a real Date object (or null if it
+// doesn't parse, which just means we skip using it for anything).
+function parseSkylightTimestamp(value) {
+  const match = /^(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+):(\d+)$/.exec((value || "").trim());
+  if (!match) return null;
+
+  const [, yy, mm, dd, hh, min, ss, ms] = match.map(Number);
+  return new Date(2000 + yy, mm - 1, dd, hh, min, ss, ms);
+}
+
+function parseSkylightInbox(xmlContent) {
+  const rawEntries = [];
+  const smsTagPattern = /<sms\s+([^>]*?)\/>/g;
+  const attrPattern = /(\w+)="([^"]*)"/g;
+
+  let tagMatch;
+  while ((tagMatch = smsTagPattern.exec(xmlContent)) !== null) {
+    const attrs = {};
+    let attrMatch;
+    attrPattern.lastIndex = 0;
+    const attrString = tagMatch[1];
+    while ((attrMatch = attrPattern.exec(attrString)) !== null) {
+      attrs[attrMatch[1]] = xmlUnescape(attrMatch[2]);
+    }
+    rawEntries.push(attrs);
+  }
+
+  // Reassemble multi-part messages (fragmsg="true") into one logical
+  // message, grouped by sender + reference number, ordered by fragment
+  // number - same concept as how the web inbox combines multipart
+  // texts already.
+  const groups = new Map();
+
+  for (const entry of rawEntries) {
+    const isFragment = entry.fragmsg === "true";
+    const groupKey = isFragment
+      ? `${entry.from}|${entry.refnum}`
+      : `single|${entry.from}|${entry.timestamp}|${entry.msg}`;
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, []);
+    }
+    groups.get(groupKey).push(entry);
+  }
+
+  const messages = [];
+
+  for (const parts of groups.values()) {
+    parts.sort((a, b) => Number(a.fragnum || 1) - Number(b.fragnum || 1));
+    const first = parts[0];
+    const combinedText = parts.map((p) => p.msg || "").join("");
+
+    messages.push({
+      from: first.from || "",
+      to: first.to || "",
+      timestampRaw: first.timestamp || "",
+      timestamp: parseSkylightTimestamp(first.timestamp),
+      text: combinedText
+    });
+  }
+
+  return messages;
+}
+
+function comparisonKey(phone, text) {
+  return `${normalizePhone(phone)}|${normalizeText(text)}`;
+}
+
+function insertSkylightMessage(message) {
+  const messageKey = `SKYLIGHT|${deviceId}|${message.from}|${message.timestampRaw}|${message.text}`;
+  const isoTimestamp = message.timestamp ? message.timestamp.toISOString() : message.timestampRaw;
+
+  const insertSql = `
+    INSERT OR IGNORE INTO messages
+      (device_id, modem_index, message_type, status, address,
+       timestamp_original, encoding, text, error, multipart,
+       concat_reference, concat_part, concat_total, raw_pdu, message_key)
+    VALUES (?, 0, 'SMS-DELIVER', 1, ?, ?, 'SKYLIGHT-RECOVERED', ?, '', 0, 0, 0, 0, '', ?)
+  `;
+
+  writableDb.run(
+    insertSql,
+    [deviceId, message.from, isoTimestamp, message.text, messageKey],
+    function callback(err) {
+      if (err) {
+        logError("Skylight cross-check: insert failed:", err.message);
+        return;
+      }
+      if (this.changes > 0) {
+        log(
+          `Skylight cross-check: recovered a message Skylight had that we ` +
+          `were missing (from ${message.from}) - it will be emailed shortly.`
+        );
+      }
+    }
+  );
+}
+
+function runSkylightCrossCheck() {
+  fs.readFile(SKYLIGHT_INBOX_PATH, "utf8", (readErr, xmlContent) => {
+    if (readErr) {
+      // Not treated as an error worth logging every minute - the file
+      // may simply not exist on a machine without Skylight installed.
+      return;
+    }
+
+    let skylightMessages;
+    try {
+      skylightMessages = parseSkylightInbox(xmlContent);
+    } catch (parseErr) {
+      logError("Skylight cross-check: could not parse RWInbox.xml:", parseErr.message);
+      return;
+    }
+
+    // Load everything currently in our own database once per check,
+    // and build a lookup set - simpler and plenty fast at this scale
+    // rather than querying per-message.
+    db.all("SELECT address, text FROM messages", [], (err, ourRows) => {
+      if (err) {
+        logError("Skylight cross-check: could not read our own messages:", err.message);
+        return;
+      }
+
+      const ourKeys = new Set(
+        ourRows.map((row) => comparisonKey(row.address, row.text))
+      );
+
+      for (const message of skylightMessages) {
+        if (!message.text) continue;
+
+        const key = comparisonKey(message.from, message.text);
+        if (!ourKeys.has(key)) {
+          insertSkylightMessage(message);
+        }
+      }
+    });
+  });
+}
+
+setInterval(runSkylightCrossCheck, SKYLIGHT_CHECK_INTERVAL_MS);
