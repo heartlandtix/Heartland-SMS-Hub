@@ -277,8 +277,6 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
   });
 });
 
-setInterval(runSkylightCrossCheck, SKYLIGHT_CHECK_INTERVAL_MS);
-
 function checkForNewMessages() {
   if (lastSeenMessageId === null) {
     // Still starting up - database not ready yet.
@@ -339,6 +337,24 @@ const writableDb = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE, (err) =
     logError(`Skylight cross-check: could not open database for writing:`, err.message);
   } else {
     log(`Skylight cross-check: watching ${SKYLIGHT_INBOX_PATH}`);
+
+    // WAL (Write-Ahead Logging) mode lets one connection write while
+    // another reads, at the same time, without either one blocking or
+    // failing the other. Without this, a database being written to
+    // frequently (the Skylight cross-check now runs every second)
+    // while also being read from heavily (the merged web inbox query
+    // on every page load) can intermittently lock each other out -
+    // seen in the field as the web inbox repeatedly failing to load.
+    // This only needs to be set once - it's a property of the
+    // database file itself, not any one connection, so it stays in
+    // effect from here on regardless of which connection opens it.
+    writableDb.run("PRAGMA journal_mode=WAL;", (walErr) => {
+      if (walErr) {
+        logError("Could not enable WAL mode:", walErr.message);
+      } else {
+        log("Database journal mode set to WAL (allows concurrent read/write).");
+      }
+    });
   }
 });
 
@@ -542,3 +558,4 @@ function runSkylightCrossCheck() {
     });
   });
 }
+setInterval(runSkylightCrossCheck, SKYLIGHT_CHECK_INTERVAL_MS);
