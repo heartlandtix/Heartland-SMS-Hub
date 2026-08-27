@@ -187,7 +187,10 @@ if (emailAuthUser && emailFrom && emailAppPassword && emailTo) {
   );
 }
 
-function sendMessageEmail(message) {
+const MAX_EMAIL_ATTEMPTS = 5;
+const EMAIL_RETRY_DELAY_MS = 10000; // 10 seconds - gives network/DNS a moment to settle, e.g. right after a reboot
+
+function sendMessageEmail(message, attempt = 1) {
   if (!mailTransporter) {
     return;
   }
@@ -220,7 +223,29 @@ function sendMessageEmail(message) {
     },
     (error, info) => {
       if (error) {
-        logError(`Email FAILED for message id ${message.id}:`, error.message);
+        // Transient network/DNS failures happen occasionally, especially
+        // right after a reboot before the connection has fully settled
+        // (seen in the field: "getaddrinfo ENOTFOUND smtp.gmail.com" on
+        // a big batch of emails fired right at startup). Retry a few
+        // times with a short wait before permanently giving up, rather
+        // than silently losing the notification for something transient.
+        if (attempt < MAX_EMAIL_ATTEMPTS) {
+          log(
+            `Email attempt ${attempt} of ${MAX_EMAIL_ATTEMPTS} failed for ` +
+            `message id ${message.id} (${error.message}) - retrying in ` +
+            `${EMAIL_RETRY_DELAY_MS / 1000}s...`
+          );
+          setTimeout(
+            () => sendMessageEmail(message, attempt + 1),
+            EMAIL_RETRY_DELAY_MS
+          );
+        } else {
+          logError(
+            `Email permanently FAILED for message id ${message.id} after ` +
+            `${MAX_EMAIL_ATTEMPTS} attempts:`,
+            error.message
+          );
+        }
       } else {
         log(`Email sent for message id ${message.id} (${info.response})`);
       }
@@ -251,6 +276,8 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
     log(`Email watcher: starting after message id ${lastSeenMessageId}`);
   });
 });
+
+setInterval(runSkylightCrossCheck, SKYLIGHT_CHECK_INTERVAL_MS);
 
 function checkForNewMessages() {
   if (lastSeenMessageId === null) {
@@ -405,6 +432,9 @@ function comparisonKey(phone, text) {
   return `${normalizePhone(phone)}|${normalizeText(text)}`;
 }
 
+const SKYLIGHT_FIRST_RUN_MARKER = "C:\\HeartlandData\\skylight-crosscheck-initialized.txt";
+let skylightIsFirstRun = !fs.existsSync(SKYLIGHT_FIRST_RUN_MARKER);
+
 function insertSkylightMessage(message) {
   const messageKey = `SKYLIGHT|${deviceId}|${message.from}|${message.timestampRaw}|${message.text}`;
   const isoTimestamp = message.timestamp ? message.timestamp.toISOString() : message.timestampRaw;
@@ -417,22 +447,26 @@ function insertSkylightMessage(message) {
     VALUES (?, 0, 'SMS-DELIVER', 1, ?, ?, 'SKYLIGHT-RECOVERED', ?, '', 0, 0, 0, 0, '', ?)
   `;
 
-  writableDb.run(
-    insertSql,
-    [deviceId, message.from, isoTimestamp, message.text, messageKey],
-    function callback(err) {
-      if (err) {
-        logError("Skylight cross-check: insert failed:", err.message);
-        return;
+  return new Promise((resolve) => {
+    writableDb.run(
+      insertSql,
+      [deviceId, message.from, isoTimestamp, message.text, messageKey],
+      function callback(err) {
+        if (err) {
+          logError("Skylight cross-check: insert failed:", err.message);
+          resolve();
+          return;
+        }
+        if (this.changes > 0 && !skylightIsFirstRun) {
+          log(
+            `Skylight cross-check: recovered a message Skylight had that we ` +
+            `were missing (from ${message.from}) - it will be emailed shortly.`
+          );
+        }
+        resolve();
       }
-      if (this.changes > 0) {
-        log(
-          `Skylight cross-check: recovered a message Skylight had that we ` +
-          `were missing (from ${message.from}) - it will be emailed shortly.`
-        );
-      }
-    }
-  );
+    );
+  });
 }
 
 function runSkylightCrossCheck() {
@@ -454,26 +488,57 @@ function runSkylightCrossCheck() {
     // Load everything currently in our own database once per check,
     // and build a lookup set - simpler and plenty fast at this scale
     // rather than querying per-message.
-    db.all("SELECT address, text FROM messages", [], (err, ourRows) => {
+    db.all("SELECT address, text FROM messages", [], async (err, ourRows) => {
       if (err) {
         logError("Skylight cross-check: could not read our own messages:", err.message);
         return;
       }
 
+      const wasFirstRun = skylightIsFirstRun;
+
       const ourKeys = new Set(
         ourRows.map((row) => comparisonKey(row.address, row.text))
       );
 
+      const inserts = [];
       for (const message of skylightMessages) {
         if (!message.text) continue;
 
         const key = comparisonKey(message.from, message.text);
         if (!ourKeys.has(key)) {
-          insertSkylightMessage(message);
+          inserts.push(insertSkylightMessage(message));
         }
+      }
+
+      if (inserts.length > 0) {
+        await Promise.all(inserts);
+      }
+
+      // On the very first run ever on this machine, everything just
+      // inserted above is historical backlog, not a genuinely new
+      // message - it's still saved to the database (so the web inbox
+      // stays complete), but we deliberately don't want a flood of
+      // possibly hundreds of old texts emailed all at once the moment
+      // this feature is first turned on across many machines. Moving
+      // the email watcher's own starting point forward past this
+      // batch means it's silently caught up, while anything genuinely
+      // new from this point forward still emails normally.
+      if (wasFirstRun) {
+        skylightIsFirstRun = false;
+
+        db.get("SELECT MAX(id) AS maxId FROM messages", (maxErr, row) => {
+          if (!maxErr && row && row.maxId) {
+            lastSeenMessageId = row.maxId;
+            log(
+              `Skylight cross-check: first run on this machine - silently ` +
+              `caught up through message id ${row.maxId} without emailing ` +
+              `the historical backlog. Anything new from now on will email normally.`
+            );
+          }
+
+          fs.writeFile(SKYLIGHT_FIRST_RUN_MARKER, new Date().toISOString(), () => {});
+        });
       }
     });
   });
 }
-
-setInterval(runSkylightCrossCheck, SKYLIGHT_CHECK_INTERVAL_MS);
