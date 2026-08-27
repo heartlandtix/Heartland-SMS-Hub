@@ -49,22 +49,86 @@ app.get("/api/status", (req, res) => {
   });
 });
 
+// Loads every message currently in our own database, in the same
+// shape the frontend already expects from the C++ program's /messages
+// endpoint - lets us merge the two sources together below.
+function loadOurDatabaseMessages() {
+  return new Promise((resolve, reject) => {
+    db.all("SELECT * FROM messages ORDER BY id ASC", [], (err, rows) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      resolve(
+        rows.map((row) => ({
+          index: row.modem_index,
+          status: row.status,
+          type: row.message_type,
+          address: row.address,
+          timestamp: row.timestamp_original,
+          encoding: row.encoding,
+          text: row.text,
+          error: row.error || "",
+          multipart: !!row.multipart,
+          reference: row.concat_reference,
+          part: row.concat_part,
+          total: row.concat_total
+        }))
+      );
+    });
+  });
+}
+
 app.get("/api/messages", async (req, res) => {
+  // The C++ program only ever shows whatever the modem currently has
+  // in its own storage right now - it has no awareness of anything
+  // saved into our database through a different path (like the
+  // Skylight cross-check below), and the modem's own storage can also
+  // silently drop older messages over time due to its own limited
+  // capacity. Merging in our own permanent database means neither of
+  // those gaps causes a message to go missing from the web inbox.
+  let liveMessages = [];
+  let liveFetchFailed = false;
+
   try {
     const response = await fetch(`${SMS_READER_URL}/messages`);
-
-    if (!response.ok) {
-      throw new Error(`SMS reader returned HTTP ${response.status}`);
+    if (response.ok) {
+      const json = await response.json();
+      liveMessages = Array.isArray(json.messages) ? json.messages : [];
+    } else {
+      liveFetchFailed = true;
     }
-
-    const json = await response.json();
-    res.json(json);
   } catch (error) {
+    liveFetchFailed = true;
+  }
+
+  let dbMessages = [];
+  try {
+    dbMessages = await loadOurDatabaseMessages();
+  } catch (error) {
+    logError("Could not load messages from our own database:", error.message);
+  }
+
+  const liveKeys = new Set(
+    liveMessages.map((m) => comparisonKey(m.address, m.text))
+  );
+
+  const onlyInDatabase = dbMessages.filter(
+    (m) => !liveKeys.has(comparisonKey(m.address, m.text))
+  );
+
+  const combined = [...liveMessages, ...onlyInDatabase];
+
+  if (liveFetchFailed && dbMessages.length === 0) {
     res.status(502).json({
       error: "Could not reach Heartland SMS Reader",
-      details: error.message
+      details: "The live modem connection is unavailable and no database records could be loaded either."
     });
+    return;
   }
+
+  res.json({ messages: combined });
 });
 
 app.get("/api/version", async (req, res) => {
