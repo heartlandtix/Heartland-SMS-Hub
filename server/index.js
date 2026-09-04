@@ -243,6 +243,23 @@ function sendMessageEmail(message, attempt = 1) {
 
 let lastSeenMessageId = null;
 
+// Durable record of the last message we actually confirmed emailing -
+// used instead of just asking "what's currently the highest id in the
+// database" at every startup. That approach has a real gap: if Node
+// restarts more than once in quick succession (seen in the field on a
+// couple of machines needing a second restart to fully come up), a
+// message can get inserted by an earlier, short-lived instance, and
+// then the NEXT instance's fresh "what's already there" check sees it
+// as already old - even though nobody was ever actually emailed about
+// it. Persisting this value ourselves, updated only when we genuinely
+// send an email, closes that gap regardless of how many times Node
+// restarts in a row.
+const LAST_EMAILED_ID_FILE = "C:\\HeartlandData\\last-emailed-message-id.txt";
+
+function persistLastSeenMessageId(id) {
+  fs.writeFile(LAST_EMAILED_ID_FILE, String(id), () => {});
+}
+
 const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
   if (err) {
     logError(`Email watcher: could not open database at ${DB_PATH}:`, err.message);
@@ -251,14 +268,29 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
 
   log(`Email watcher: watching database at ${DB_PATH}`);
 
-  db.get("SELECT MAX(id) AS maxId FROM messages", (err, row) => {
-    if (err) {
-      logError("Email watcher: could not read starting message id:", err.message);
+  fs.readFile(LAST_EMAILED_ID_FILE, "utf8", (readErr, persistedValue) => {
+    const persisted = readErr ? NaN : parseInt(persistedValue, 10);
+
+    if (!isNaN(persisted)) {
+      lastSeenMessageId = persisted;
+      log(`Email watcher: resuming from persisted message id ${lastSeenMessageId}`);
       return;
     }
 
-    lastSeenMessageId = row && row.maxId ? row.maxId : 0;
-    log(`Email watcher: starting after message id ${lastSeenMessageId}`);
+    // No persisted value exists yet - this is genuinely the very
+    // first time this machine has ever run, so fall back to "start
+    // counting from whatever's already here" to avoid emailing an
+    // entire pre-existing history on first install.
+    db.get("SELECT MAX(id) AS maxId FROM messages", (err, row) => {
+      if (err) {
+        logError("Email watcher: could not read starting message id:", err.message);
+        return;
+      }
+
+      lastSeenMessageId = row && row.maxId ? row.maxId : 0;
+      log(`Email watcher: starting after message id ${lastSeenMessageId}`);
+      persistLastSeenMessageId(lastSeenMessageId);
+    });
   });
 });
 
@@ -278,6 +310,7 @@ function checkForNewMessages() {
 
       for (const row of rows) {
         lastSeenMessageId = row.id;
+        persistLastSeenMessageId(row.id);
         sendMessageEmail(row);
       }
     }
@@ -539,6 +572,7 @@ function runSkylightCrossCheck() {
         db.get("SELECT MAX(id) AS maxId FROM messages", (maxErr, row) => {
           if (!maxErr && row && row.maxId) {
             lastSeenMessageId = row.maxId;
+            persistLastSeenMessageId(row.maxId);
             log(
               `Skylight cross-check: first run on this machine - silently ` +
               `caught up through message id ${row.maxId} without emailing ` +
