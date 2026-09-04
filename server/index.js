@@ -80,6 +80,10 @@ function loadOurDatabaseMessages() {
   });
 }
 
+function comparisonKey(phone, text) {
+  return `${normalizePhone(phone)}|${normalizeText(text)}`;
+}
+
 app.get("/api/messages", async (req, res) => {
   // The C++ program only ever shows whatever the modem currently has
   // in its own storage right now - it has no awareness of anything
@@ -152,12 +156,6 @@ app.listen(PORT, "0.0.0.0", () => {
 
 // ---------------------------------------------------------------------
 // Email alerts for new SMS messages.
-//
-// This watches the SQLite database directly (the same file the C++
-// reader writes to) and sends one email per new message row. It is
-// completely independent of the proxy endpoints above - if email
-// sending is unconfigured or fails, the web inbox keeps working
-// exactly as before.
 // ---------------------------------------------------------------------
 
 const emailAuthUser = (process.env.EMAIL_AUTH_USER || "").trim();
@@ -188,17 +186,13 @@ if (emailAuthUser && emailFrom && emailAppPassword && emailTo) {
 }
 
 const MAX_EMAIL_ATTEMPTS = 5;
-const EMAIL_RETRY_DELAY_MS = 10000; // 10 seconds - gives network/DNS a moment to settle, e.g. right after a reboot
+const EMAIL_RETRY_DELAY_MS = 10000;
 
 function sendMessageEmail(message, attempt = 1) {
   if (!mailTransporter) {
     return;
   }
 
-  // "SMS-DELIVER" is a message this machine received; anything else
-  // (e.g. "SMS-SUBMIT") is a message this machine sent out - same
-  // distinction the web inbox already shows as an Incoming/Outgoing
-  // badge.
   const isIncoming = message.message_type === "SMS-DELIVER";
   const direction = isIncoming ? "Received" : "Sent";
   const addressLabel = isIncoming ? "From" : "To";
@@ -223,12 +217,6 @@ function sendMessageEmail(message, attempt = 1) {
     },
     (error, info) => {
       if (error) {
-        // Transient network/DNS failures happen occasionally, especially
-        // right after a reboot before the connection has fully settled
-        // (seen in the field: "getaddrinfo ENOTFOUND smtp.gmail.com" on
-        // a big batch of emails fired right at startup). Retry a few
-        // times with a short wait before permanently giving up, rather
-        // than silently losing the notification for something transient.
         if (attempt < MAX_EMAIL_ATTEMPTS) {
           log(
             `Email attempt ${attempt} of ${MAX_EMAIL_ATTEMPTS} failed for ` +
@@ -263,9 +251,6 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
 
   log(`Email watcher: watching database at ${DB_PATH}`);
 
-  // Start from whatever the highest existing row id is, so only
-  // messages that arrive from now on get emailed - not the entire
-  // pre-existing history.
   db.get("SELECT MAX(id) AS maxId FROM messages", (err, row) => {
     if (err) {
       logError("Email watcher: could not read starting message id:", err.message);
@@ -279,7 +264,6 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
 
 function checkForNewMessages() {
   if (lastSeenMessageId === null) {
-    // Still starting up - database not ready yet.
     return;
   }
 
@@ -303,20 +287,82 @@ function checkForNewMessages() {
 setInterval(checkForNewMessages, POLL_INTERVAL_MS);
 
 // ---------------------------------------------------------------------
+// Reader health check (self-report if the internet is fine but the
+// SMS reader itself has stopped responding).
+//
+// Node checks the C++ reader's own local /health endpoint every 5
+// minutes. If it's unreachable, Node sends ONE alert email (not
+// repeated every 5 minutes while still down) - and since that email
+// successfully sending proves this machine's internet connection is
+// fine, it specifically means the READER program itself is the
+// problem, not the network. A single "back online" email follows once
+// it responds again.
+// ---------------------------------------------------------------------
+
+const READER_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const READER_HEALTH_CHECK_TIMEOUT_MS = 5000;
+const deviceId = os.hostname();
+let readerIsDown = false;
+
+function sendReaderHealthEmail(recovered) {
+  if (!mailTransporter) {
+    return;
+  }
+
+  const subject = recovered
+    ? `Heartland SMS Hub - ${deviceId} is back online`
+    : `Heartland SMS Hub - ${deviceId} is NOT responding`;
+
+  const body = recovered
+    ? `The SMS reader program on ${deviceId} is responding again as of ` +
+      `${new Date().toLocaleString()}.`
+    : `The SMS reader program on ${deviceId} has not responded to a local ` +
+      `health check as of ${new Date().toLocaleString()}. This machine's ` +
+      `internet connection is working (since this email sent ` +
+      `successfully), but the reader itself may be stuck, crashed, or ` +
+      `restarting.`;
+
+  mailTransporter.sendMail(
+    { from: emailFrom, to: emailTo, subject, text: body },
+    (error) => {
+      if (error) {
+        logError("Reader health alert email FAILED:", error.message);
+      } else {
+        log(`Reader health alert email sent (${recovered ? "recovered" : "down"}).`);
+      }
+    }
+  );
+}
+
+async function checkReaderHealth() {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), READER_HEALTH_CHECK_TIMEOUT_MS);
+    const response = await fetch(`${SMS_READER_URL}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    if (readerIsDown) {
+      readerIsDown = false;
+      log("Reader health check: back online.");
+      sendReaderHealthEmail(true);
+    }
+  } catch (error) {
+    if (!readerIsDown) {
+      readerIsDown = true;
+      logError("Reader health check: reader is not responding:", error.message);
+      sendReaderHealthEmail(false);
+    }
+  }
+}
+
+setInterval(checkReaderHealth, READER_HEALTH_CHECK_INTERVAL_MS);
+
+// ---------------------------------------------------------------------
 // Skylight cross-check (redundancy safety net).
-//
-// Skylight keeps its own separate record of every SMS it sees, in a
-// plain XML file. Occasionally Skylight reads AND deletes a brand new
-// message off the SIM within roughly a second of it arriving - fast
-// enough that our own reader sometimes never gets a chance to read it
-// at all, even though Skylight itself has a copy the whole time.
-//
-// This periodically reads Skylight's own inbox file, compares it
-// against what's already in OUR database, and for anything Skylight
-// has that we're missing, inserts it directly into our own database -
-// which then flows through the exact same "new row -> send email"
-// mechanism above automatically, no separate email-sending code
-// needed here at all.
 // ---------------------------------------------------------------------
 
 const SKYLIGHT_INBOX_PATH = path.join(
@@ -325,13 +371,10 @@ const SKYLIGHT_INBOX_PATH = path.join(
   "Skylight",
   "RWInbox.xml"
 );
-const SKYLIGHT_CHECK_INTERVAL_MS = 1000; // 1 second - both files/database confirmed tiny, so no real cost to checking this often
+const SKYLIGHT_CHECK_INTERVAL_MS = 1000;
+const SKYLIGHT_FIRST_RUN_MARKER = "C:\\HeartlandData\\skylight-crosscheck-initialized.txt";
+let skylightIsFirstRun = !fs.existsSync(SKYLIGHT_FIRST_RUN_MARKER);
 
-const deviceId = os.hostname();
-
-// A second, separate, WRITABLE connection to the same database - kept
-// apart from the read-only one above so this new feature can never
-// accidentally affect the already-proven email-alert path.
 const writableDb = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE, (err) => {
   if (err) {
     logError(`Skylight cross-check: could not open database for writing:`, err.message);
@@ -349,9 +392,6 @@ function xmlUnescape(value) {
     .replace(/&amp;/g, "&");
 }
 
-// Reduces any phone number format to its last 10 digits, so
-// "+15203908115", "15203908115", and "5203908115" all compare equal.
-// Short codes (e.g. "38263") are left as-is since they're already short.
 function normalizePhone(address) {
   const digits = (address || "").replace(/\D/g, "");
   return digits.length > 10 ? digits.slice(-10) : digits;
@@ -361,9 +401,6 @@ function normalizeText(text) {
   return (text || "").replace(/\s+/g, " ").trim();
 }
 
-// Skylight timestamps look like "26/6/25 8:1:48:168" - YY/M/D H:M:S:MS,
-// no leading zeros. Converts to a real Date object (or null if it
-// doesn't parse, which just means we skip using it for anything).
 function parseSkylightTimestamp(value) {
   const match = /^(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+):(\d+)$/.exec((value || "").trim());
   if (!match) return null;
@@ -389,10 +426,6 @@ function parseSkylightInbox(xmlContent) {
     rawEntries.push(attrs);
   }
 
-  // Reassemble multi-part messages (fragmsg="true") into one logical
-  // message, grouped by sender + reference number, ordered by fragment
-  // number - same concept as how the web inbox combines multipart
-  // texts already.
   const groups = new Map();
 
   for (const entry of rawEntries) {
@@ -425,13 +458,6 @@ function parseSkylightInbox(xmlContent) {
 
   return messages;
 }
-
-function comparisonKey(phone, text) {
-  return `${normalizePhone(phone)}|${normalizeText(text)}`;
-}
-
-const SKYLIGHT_FIRST_RUN_MARKER = "C:\\HeartlandData\\skylight-crosscheck-initialized.txt";
-let skylightIsFirstRun = !fs.existsSync(SKYLIGHT_FIRST_RUN_MARKER);
 
 function insertSkylightMessage(message) {
   const messageKey = `SKYLIGHT|${deviceId}|${message.from}|${message.timestampRaw}|${message.text}`;
@@ -470,8 +496,6 @@ function insertSkylightMessage(message) {
 function runSkylightCrossCheck() {
   fs.readFile(SKYLIGHT_INBOX_PATH, "utf8", (readErr, xmlContent) => {
     if (readErr) {
-      // Not treated as an error worth logging every minute - the file
-      // may simply not exist on a machine without Skylight installed.
       return;
     }
 
@@ -483,9 +507,6 @@ function runSkylightCrossCheck() {
       return;
     }
 
-    // Load everything currently in our own database once per check,
-    // and build a lookup set - simpler and plenty fast at this scale
-    // rather than querying per-message.
     db.all("SELECT address, text FROM messages", [], async (err, ourRows) => {
       if (err) {
         logError("Skylight cross-check: could not read our own messages:", err.message);
@@ -512,15 +533,6 @@ function runSkylightCrossCheck() {
         await Promise.all(inserts);
       }
 
-      // On the very first run ever on this machine, everything just
-      // inserted above is historical backlog, not a genuinely new
-      // message - it's still saved to the database (so the web inbox
-      // stays complete), but we deliberately don't want a flood of
-      // possibly hundreds of old texts emailed all at once the moment
-      // this feature is first turned on across many machines. Moving
-      // the email watcher's own starting point forward past this
-      // batch means it's silently caught up, while anything genuinely
-      // new from this point forward still emails normally.
       if (wasFirstRun) {
         skylightIsFirstRun = false;
 
@@ -540,4 +552,5 @@ function runSkylightCrossCheck() {
     });
   });
 }
+
 setInterval(runSkylightCrossCheck, SKYLIGHT_CHECK_INTERVAL_MS);
