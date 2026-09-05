@@ -67,12 +67,6 @@ public:
         return value;
     }
 
-    // Windows broadcasts SMS read-complete events to every listener,
-    // not just the one that issued a particular read request - other
-    // software on this PC (e.g. Skylight) reading SMS at the same time
-    // can otherwise be mistaken for our own request completing. Once
-    // we know which request id SmsRead() gave us, we ignore every
-    // event that isn't a response to that specific request.
     void SetExpectedRequestId(ULONG requestId)
     {
         expectedRequestId_ = requestId;
@@ -114,9 +108,6 @@ public:
 
         if (!hasExpectedRequestId_ || requestID != expectedRequestId_)
         {
-            // This completion belongs to some other program's SMS read
-            // request (or arrived before we knew our own request id) -
-            // not ours. Ignore it and keep waiting for our own.
             return S_OK;
         }
 
@@ -641,10 +632,6 @@ static bool ReadMessagesOnce(
     return SUCCEEDED(hr);
 }
 
-// Wraps ReadMessagesOnce with a few retries. Reads occasionally fail
-// with a transient error when this program's read request collides
-// with another program (e.g. Skylight) reading SMS storage at the
-// same moment - retrying a moment later usually succeeds.
 static bool ReadMessagesWithRetries(
     IMbnSms* sms,
     IConnectionPoint* smsConnectionPoint,
@@ -807,13 +794,6 @@ static void RunHttpServer(
             continue;
         }
 
-        // Some browsers open a speculative connection to a site before
-        // actually requesting a page, and may send no data on it for a
-        // while. Without a timeout, this server (which only handles one
-        // connection at a time) would sit frozen waiting on that single
-        // connection, blocking every other request behind it. A short
-        // timeout means a connection like that gets skipped instead of
-        // stalling the whole server.
         DWORD socketTimeoutMs = 3000;
         setsockopt(
             client,
@@ -837,9 +817,6 @@ static void RunHttpServer(
 
         if (received <= 0)
         {
-            // Timed out or the connection closed with no data (e.g. a
-            // speculative preconnect). Nothing to respond to - just
-            // close it and move on to the next connection.
             shutdown(client, SD_BOTH);
             closesocket(client);
             continue;
@@ -917,27 +894,9 @@ static void RunHttpServer(
 
 int wmain(int argc, wchar_t* argv[])
 {
-    // When this program's output is redirected into a log file (as it
-    // is when running invisibly in the background) instead of a real
-    // console window, std::wcout can otherwise silently produce NO
-    // output at all - this forces it to actually write correctly
-    // either way, so the log files are genuinely useful for checking
-    // on a hidden/background instance.
     _setmode(_fileno(stdout), _O_U8TEXT);
     _setmode(_fileno(stderr), _O_U8TEXT);
 
-    // When output is redirected to a file (as it is when running
-    // invisibly in the background) rather than a real console, the
-    // system quietly switches to holding output in memory and only
-    // actually writing it to disk once that buffer fills up or the
-    // program exits - not after every line, the way a real console
-    // behaves. Since this program runs indefinitely, that means the
-    // log file could sit essentially empty for the program's entire
-    // healthy lifetime, only actually showing content once something
-    // eventually makes it exit. This forces every line to be written
-    // out immediately, regardless of whether it's a console or a
-    // redirected file, so the log is genuinely useful to check while
-    // the program is still running normally.
     std::wcout << std::unitbuf;
     std::wcerr << std::unitbuf;
 
@@ -1109,19 +1068,37 @@ int wmain(int argc, wchar_t* argv[])
         knownMessages.insert(MessageKey(message));
     }
 
+    // Silently ensure every message currently on the SIM at startup is
+    // also in our permanent database - not to treat any of them as
+    // "new" right now (that would flood the console/log on every
+    // single restart), but specifically to close a real gap: if a
+    // message arrived while this program simply wasn't running at
+    // all, it would otherwise be silently treated as "already known"
+    // forever the instant this program next starts up, without ever
+    // having been saved or emailed. InsertMessage's own INSERT OR
+    // IGNORE logic (keyed on device + actual message content, not
+    // storage slot) means this is completely safe to call for every
+    // message on every single startup - anything already properly
+    // recorded from a previous run is harmlessly skipped, while
+    // anything that arrived during a gap gets a real database row
+    // now, which the email watcher will then correctly pick up and
+    // email shortly, exactly as if it had just been detected live.
+    for (const auto& message : messages)
+    {
+        DecodedSms decoded = PduDecoder::Decode(message.pdu);
+        messageStore.InsertMessage(
+            message.index,
+            message.status,
+            message.pdu,
+            decoded);
+    }
+
     std::wcout << L"Messages currently stored: "
                << messages.size() << L"\n";
     std::wcout << L"Waiting for Windows SMS status-change events.\n"
                << L"Press Q in this console to stop.\n";
 
-    // Watchdog: periodically prove to ourselves that the modem
-    // connection is still genuinely responsive, rather than passively
-    // hoping an event eventually arrives. If several checks in a row
-    // fail, this program has likely gone stale (seen tonight as long
-    // stretches of total silence despite real texts arriving) - in
-    // that case, exit with a distinct code so the launcher can restart
-    // this program automatically, rather than requiring a manual fix.
-    const ULONGLONG healthCheckIntervalMs = 2ULL * 60ULL * 1000ULL; // 2 minutes
+    const ULONGLONG healthCheckIntervalMs = 2ULL * 60ULL * 1000ULL;
     const int maxHealthCheckFailures = 1;
     const int watchdogExitCode = 42;
 
@@ -1142,8 +1119,6 @@ int wmain(int argc, wchar_t* argv[])
     {
         if (WaitForLocalServerReady(8080, 15000))
         {
-            // Use Windows' URL protocol handler so browsers such as Opera
-            // receive the complete http:// URL instead of a bare address.
             ShellExecuteW(
                 nullptr,
                 L"open",
@@ -1202,17 +1177,6 @@ int wmain(int argc, wchar_t* argv[])
 
             continue;
         }
-
-        // No artificial delay here on purpose - a full second of
-        // waiting was giving Skylight (which appears to read and then
-        // delete new messages almost immediately) a head start, letting
-        // it sometimes remove a message from the SIM before we ever
-        // got a chance to read it, so it never appeared in our results.
-        // The retry logic just below (4 attempts, 1.5s apart) already
-        // provides the same "let things settle" cushion this delay
-        // used to give, so removing it doesn't lose that protection -
-        // it just removes an unnecessary head start for whoever else
-        // is racing to read the same message first.
 
         std::vector<SmsEventSink::RawMessage> latestMessages;
         HRESULT latestStatus = E_PENDING;
