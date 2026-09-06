@@ -581,7 +581,8 @@ static bool ReadMessagesOnce(
     IMbnSms* sms,
     IConnectionPoint* smsConnectionPoint,
     std::vector<SmsEventSink::RawMessage>& messages,
-    HRESULT& finalStatus)
+    HRESULT& finalStatus,
+    DWORD waitTimeoutMs = 90000)
 {
     messages.clear();
     finalStatus = E_PENDING;
@@ -614,7 +615,7 @@ static bool ReadMessagesOnce(
     {
         sink->SetExpectedRequestId(requestId);
 
-        if (!sink->Wait(90000))
+        if (!sink->Wait(waitTimeoutMs))
         {
             hr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
         }
@@ -639,11 +640,12 @@ static bool ReadMessagesWithRetries(
     HRESULT& finalStatus,
     int maxAttempts,
     DWORD retryDelayMs,
-    const wchar_t* contextLabel)
+    const wchar_t* contextLabel,
+    DWORD waitTimeoutMs = 90000)
 {
     for (int attempt = 1; attempt <= maxAttempts; ++attempt)
     {
-        if (ReadMessagesOnce(sms, smsConnectionPoint, messages, finalStatus))
+        if (ReadMessagesOnce(sms, smsConnectionPoint, messages, finalStatus, waitTimeoutMs))
         {
             return true;
         }
@@ -1183,7 +1185,7 @@ int wmain(int argc, wchar_t* argv[])
 
         if (!ReadMessagesWithRetries(
                 changedSms, smsConnectionPoint, latestMessages, latestStatus,
-                4, 750, L"Event refresh"))
+                4, 750, L"Event refresh", 15000))
         {
             SYSTEMTIME now{};
             GetLocalTime(&now);
