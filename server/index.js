@@ -236,11 +236,23 @@ function sendMessageEmail(message, attempt = 1) {
         }
       } else {
         log(`Email sent for message id ${message.id} (${info.response})`);
+
+        // Only now - genuinely confirmed sent, not just found - do we
+        // durably persist this as "handled." The guard against moving
+        // backward matters because retries can occasionally complete
+        // out of order (a later message succeeding before an earlier
+        // one that's still retrying) - we never want a late success to
+        // un-persist progress a higher id already recorded.
+        if (message.id > highestConfirmedEmailedId) {
+          highestConfirmedEmailedId = message.id;
+          persistLastSeenMessageId(message.id);
+        }
       }
     }
   );
 }
 
+let highestConfirmedEmailedId = 0;
 let lastSeenMessageId = null;
 
 // Durable record of the last message we actually confirmed emailing -
@@ -273,6 +285,7 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
 
     if (!isNaN(persisted)) {
       lastSeenMessageId = persisted;
+      highestConfirmedEmailedId = persisted;
       log(`Email watcher: resuming from persisted message id ${lastSeenMessageId}`);
       return;
     }
@@ -288,11 +301,26 @@ const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
       }
 
       lastSeenMessageId = row && row.maxId ? row.maxId : 0;
+      highestConfirmedEmailedId = lastSeenMessageId;
       log(`Email watcher: starting after message id ${lastSeenMessageId}`);
       persistLastSeenMessageId(lastSeenMessageId);
     });
   });
 });
+
+// If an unusually large number of new messages appear in a single
+// check, that's a sign of some kind of one-time backlog catch-up
+// (a fresh deployment finding hundreds of pre-existing messages, for
+// example) rather than genuine real-time activity - normal traffic
+// arrives one or two at a time, not hundreds at once. Emailing an
+// entire large batch individually risks Gmail's own rate-limiting
+// blocking the whole shared account for a while, affecting every
+// machine's email delivery, not just this one. Past this threshold,
+// the whole batch is silently caught up instead - saved to the
+// database and visible in the web inbox, exactly like the dedicated
+// Skylight first-run protection already does, just applied generally
+// so it protects against any future source of a bulk backlog too.
+const BULK_BATCH_THRESHOLD = 15;
 
 function checkForNewMessages() {
   if (lastSeenMessageId === null) {
@@ -308,9 +336,28 @@ function checkForNewMessages() {
         return;
       }
 
+      if (rows.length === 0) {
+        return;
+      }
+
+      if (rows.length > BULK_BATCH_THRESHOLD) {
+        const lastRow = rows[rows.length - 1];
+        log(
+          `Email watcher: ${rows.length} new messages appeared at once - ` +
+          `treating this as a one-time backlog catch-up rather than ` +
+          `emailing each one individually, to avoid triggering Gmail's ` +
+          `own rate limiting. Silently caught up through message id ` +
+          `${lastRow.id}. Anything new from now on will email normally.`
+        );
+
+        lastSeenMessageId = lastRow.id;
+        highestConfirmedEmailedId = lastRow.id;
+        persistLastSeenMessageId(lastRow.id);
+        return;
+      }
+
       for (const row of rows) {
         lastSeenMessageId = row.id;
-        persistLastSeenMessageId(row.id);
         sendMessageEmail(row);
       }
     }
@@ -367,6 +414,8 @@ function sendReaderHealthEmail(recovered) {
   );
 }
 
+const { exec } = require("child_process");
+
 async function checkReaderHealth() {
   try {
     const controller = new AbortController();
@@ -388,6 +437,19 @@ async function checkReaderHealth() {
       readerIsDown = true;
       logError("Reader health check: reader is not responding:", error.message);
       sendReaderHealthEmail(false);
+
+      // Try the same lightweight fix already proven elsewhere - this
+      // runs independently of the reader's own internal recovery
+      // logic, so it still has a chance to help even if the reader
+      // process itself is frozen badly enough that its own internal
+      // safety net can't run either.
+      exec('schtasks /run /tn "Heartland Restart WWAN Service"', (execErr) => {
+        if (execErr) {
+          logError("Health check: could not trigger WWAN service restart:", execErr.message);
+        } else {
+          log("Health check: triggered an automatic WWAN service restart.");
+        }
+      });
     }
   }
 }
@@ -572,6 +634,7 @@ function runSkylightCrossCheck() {
         db.get("SELECT MAX(id) AS maxId FROM messages", (maxErr, row) => {
           if (!maxErr && row && row.maxId) {
             lastSeenMessageId = row.maxId;
+            highestConfirmedEmailedId = row.maxId;
             persistLastSeenMessageId(row.maxId);
             log(
               `Skylight cross-check: first run on this machine - silently ` +
