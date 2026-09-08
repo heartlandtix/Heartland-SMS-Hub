@@ -330,6 +330,7 @@ public:
         IMbnSms*, ULONG, HRESULT) override
     {
         LogSmsEvent(L"OnSmsDeleteComplete");
+        lastDeleteCompleteTick_.store(GetTickCount64());
         return S_OK;
     }
 
@@ -360,12 +361,29 @@ public:
         return changedSms != nullptr;
     }
 
+    // Returns how many milliseconds ago OnSmsDeleteComplete last
+    // fired - used to detect the specific "lost the race with
+    // Skylight" signature: a status-change event and a deletion
+    // happening within moments of each other, right before a refresh
+    // read comes back with nothing new. A huge value means it hasn't
+    // fired recently (or at all).
+    ULONGLONG MillisecondsSinceLastDelete() const
+    {
+        ULONGLONG lastTick = lastDeleteCompleteTick_.load();
+        if (lastTick == 0)
+        {
+            return static_cast<ULONGLONG>(-1);
+        }
+        return GetTickCount64() - lastTick;
+    }
+
 private:
     std::atomic<ULONG> refCount_;
     std::mutex mutex_;
     std::condition_variable cv_;
     bool changed_ = false;
     CComPtr<IMbnSms> changedSms_;
+    std::atomic<ULONGLONG> lastDeleteCompleteTick_{0};
 };
 
 
@@ -1253,6 +1271,77 @@ int wmain(int argc, wchar_t* argv[])
 
             std::wcout << L"Updated web inbox. New messages: "
                        << newCount << L"\n";
+        }
+        else
+        {
+            // A status change fired (that's why we're here at all),
+            // but nothing new was found. If a deletion also happened
+            // within the last couple seconds, this matches the exact
+            // signature of losing the race with Skylight - it likely
+            // read and deleted the message before we got a chance to
+            // see it. Logged distinctly for now so this can be
+            // confirmed with real field data before deciding whether
+            // to wire it into any automatic response.
+            ULONGLONG msSinceDelete = statusSink->MillisecondsSinceLastDelete();
+            if (msSinceDelete <= 3000)
+            {
+                SYSTEMTIME raceNow{};
+                GetLocalTime(&raceNow);
+
+                std::wcout << std::setfill(L'0')
+                           << L"\n[" << DayOfWeekName(raceNow.wDayOfWeek) << L" "
+                           << raceNow.wYear << L"-"
+                           << std::setw(2) << raceNow.wMonth << L"-"
+                           << std::setw(2) << raceNow.wDay << L" "
+                           << std::setw(2) << raceNow.wHour << L":"
+                           << std::setw(2) << raceNow.wMinute << L":"
+                           << std::setw(2) << raceNow.wSecond
+                           << L"] POSSIBLE LOST RACE: a status change and a "
+                           << L"deletion happened within " << msSinceDelete
+                           << L"ms of each other, but nothing new was found. "
+                           << L"This likely means Skylight (or another program) "
+                           << L"read and deleted a message before we could.\n";
+
+                // Insert this as a special alert "message" so it flows
+                // through the exact same email pipeline as a normal
+                // text - no new email-sending code needed at all, just
+                // reusing what's already proven to work. The device
+                // name is already added automatically by InsertMessage
+                // itself, and shows up in the email body the same way
+                // it does for every other message.
+                wchar_t alertTimeBuf[64];
+                swprintf_s(
+                    alertTimeBuf,
+                    L"%04d-%02d-%02d %02d:%02d:%02d",
+                    raceNow.wYear, raceNow.wMonth, raceNow.wDay,
+                    raceNow.wHour, raceNow.wMinute, raceNow.wSecond);
+
+                DecodedSms raceAlert{};
+                raceAlert.sender = L"SYSTEM ALERT";
+                raceAlert.recipient = L"";
+                raceAlert.messageType = L"SMS-DELIVER";
+                raceAlert.encoding = L"RACE-DETECTION";
+                raceAlert.timestamp = alertTimeBuf;
+                raceAlert.text =
+                    L"Possible lost race detected: a status change and a "
+                    L"deletion happened within " + std::to_wstring(msSinceDelete) +
+                    L"ms of each other, and nothing new was found afterward. "
+                    L"This likely means Skylight (or another program) read "
+                    L"and deleted a message before this program could see it.";
+                raceAlert.error = L"";
+                raceAlert.isMultipart = false;
+                raceAlert.concatReference = 0;
+                raceAlert.concatPart = 0;
+                raceAlert.concatTotal = 0;
+
+                // A unique synthetic "PDU" so each detected event gets
+                // its own row, rather than being silently deduplicated
+                // against an earlier one.
+                std::wstring syntheticPdu =
+                    L"RACE-ALERT|" + std::wstring(alertTimeBuf);
+
+                messageStore.InsertMessage(0, 0, syntheticPdu, raceAlert);
+            }
         }
     }
 
