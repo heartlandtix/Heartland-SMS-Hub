@@ -379,12 +379,17 @@ setInterval(checkForNewMessages, POLL_INTERVAL_MS);
 // it responds again.
 // ---------------------------------------------------------------------
 
-const READER_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const READER_HEALTH_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const READER_HEALTH_CHECK_TIMEOUT_MS = 5000;
+const MAX_HEALTH_RETRY_ATTEMPTS = 5;
+const HEALTH_RETRY_DELAY_MS = 30 * 1000; // 30 seconds between attempts
 const deviceId = os.hostname();
 let readerIsDown = false;
 
-function sendReaderHealthEmail(recovered) {
+const MAX_HEALTH_EMAIL_ATTEMPTS = 6;
+const HEALTH_EMAIL_RETRY_DELAY_MS = 60 * 1000; // 1 minute - a real network outage may take a few minutes to clear
+
+function sendReaderHealthEmail(recovered, attempt = 1) {
   if (!mailTransporter) {
     return;
   }
@@ -396,17 +401,40 @@ function sendReaderHealthEmail(recovered) {
   const body = recovered
     ? `The SMS reader program on ${deviceId} is responding again as of ` +
       `${new Date().toLocaleString()}.`
-    : `The SMS reader program on ${deviceId} has not responded to a local ` +
-      `health check as of ${new Date().toLocaleString()}. This machine's ` +
-      `internet connection is working (since this email sent ` +
-      `successfully), but the reader itself may be stuck, crashed, or ` +
-      `restarting.`;
+    : `${deviceId} has not passed a health check as of ` +
+      `${new Date().toLocaleString()}, even after ${MAX_HEALTH_RETRY_ATTEMPTS} ` +
+      `automatic recovery attempts. This could mean the reader program ` +
+      `itself is stuck, or that this machine has lost internet ` +
+      `connectivity entirely - either way, it likely needs manual ` +
+      `attention (Chrome Remote Desktop, if reachable, or in person).`;
 
   mailTransporter.sendMail(
     { from: emailFrom, to: emailTo, subject, text: body },
     (error) => {
       if (error) {
-        logError("Reader health alert email FAILED:", error.message);
+        // A "down" alert is often being sent at the exact worst
+        // moment - when internet may genuinely be part of the
+        // problem - so a single failed attempt doesn't mean much.
+        // Retry several times, spaced a minute apart, rather than
+        // silently giving up on the one notification that matters
+        // most.
+        if (attempt < MAX_HEALTH_EMAIL_ATTEMPTS) {
+          logError(
+            `Reader health alert attempt ${attempt} of ${MAX_HEALTH_EMAIL_ATTEMPTS} ` +
+            `failed (${error.message}) - retrying in ` +
+            `${HEALTH_EMAIL_RETRY_DELAY_MS / 1000}s...`
+          );
+          setTimeout(
+            () => sendReaderHealthEmail(recovered, attempt + 1),
+            HEALTH_EMAIL_RETRY_DELAY_MS
+          );
+        } else {
+          logError(
+            `Reader health alert permanently FAILED after ` +
+            `${MAX_HEALTH_EMAIL_ATTEMPTS} attempts:`,
+            error.message
+          );
+        }
       } else {
         log(`Reader health alert email sent (${recovered ? "recovered" : "down"}).`);
       }
@@ -416,43 +444,160 @@ function sendReaderHealthEmail(recovered) {
 
 const { exec } = require("child_process");
 
-async function checkReaderHealth() {
+// Checks real internet connectivity, not just whether the reader's own
+// local page loads - a reader can be running perfectly fine locally
+// while the machine has no actual internet connection at all, which a
+// purely local check would never catch. Same technique already used
+// in Check-Internet-Connectivity.bat (ping two reliable addresses;
+// only fails if BOTH are unreachable, so one flaky server doesn't
+// cause a false alarm).
+function hasInternetConnectivity() {
+  return new Promise((resolve) => {
+    exec("ping -n 1 -w 3000 8.8.8.8", (err1) => {
+      if (!err1) {
+        resolve(true);
+        return;
+      }
+      exec("ping -n 1 -w 3000 1.1.1.1", (err2) => {
+        resolve(!err2);
+      });
+    });
+  });
+}
+
+async function isReaderHealthy() {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), READER_HEALTH_CHECK_TIMEOUT_MS);
     const response = await fetch(`${SMS_READER_URL}/health`, { signal: controller.signal });
     clearTimeout(timeout);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    if (readerIsDown) {
-      readerIsDown = false;
-      log("Reader health check: back online.");
-      sendReaderHealthEmail(true);
-    }
+    return response.ok;
   } catch (error) {
-    if (!readerIsDown) {
-      readerIsDown = true;
-      logError("Reader health check: reader is not responding:", error.message);
-      sendReaderHealthEmail(false);
-
-      // Try the same lightweight fix already proven elsewhere - this
-      // runs independently of the reader's own internal recovery
-      // logic, so it still has a chance to help even if the reader
-      // process itself is frozen badly enough that its own internal
-      // safety net can't run either.
-      exec('schtasks /run /tn "Heartland Restart WWAN Service"', (execErr) => {
-        if (execErr) {
-          logError("Health check: could not trigger WWAN service restart:", execErr.message);
-        } else {
-          log("Health check: triggered an automatic WWAN service restart.");
-        }
-      });
-    }
+    return false;
   }
 }
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function triggerWwanRestart() {
+  return new Promise((resolve) => {
+    exec('schtasks /run /tn "Heartland Restart WWAN Service"', (execErr) => {
+      if (execErr) {
+        logError("Health check: could not trigger WWAN service restart:", execErr.message);
+      } else {
+        log("Health check: triggered an automatic WWAN service restart.");
+      }
+      resolve();
+    });
+  });
+}
+
+const HEALTH_RESTART_COUNT_FILE = "C:\\HeartlandData\\health-check-restart-count.txt";
+const MAX_HEALTH_AUTO_RESTARTS = 3;
+
+function readHealthRestartCount() {
+  return new Promise((resolve) => {
+    fs.readFile(HEALTH_RESTART_COUNT_FILE, "utf8", (err, data) => {
+      const count = err ? 0 : parseInt(data, 10);
+      resolve(isNaN(count) ? 0 : count);
+    });
+  });
+}
+
+function writeHealthRestartCount(count) {
+  fs.writeFile(HEALTH_RESTART_COUNT_FILE, String(count), () => {});
+}
+
+async function checkReaderHealth() {
+  const readerOk = await isReaderHealthy();
+  const internetOk = await hasInternetConnectivity();
+
+  if (readerOk && internetOk) {
+    if (readerIsDown) {
+      readerIsDown = false;
+      log("Health check: back online.");
+      sendReaderHealthEmail(true);
+    }
+    // A genuinely healthy check resets the restart counter, so a bad
+    // day doesn't permanently use up future chances to recover.
+    writeHealthRestartCount(0);
+    return;
+  }
+
+  // Something's wrong - either the reader itself, or general internet
+  // connectivity. Retry the lightweight fix several times, with a
+  // pause between each, before finally giving up and alerting - a
+  // single attempt wasn't always enough in the field.
+  logError(
+    `Health check: problem detected (reader ${readerOk ? "ok" : "NOT responding"}, ` +
+    `internet ${internetOk ? "ok" : "NOT reachable"}). Beginning recovery attempts...`
+  );
+
+  for (let attempt = 1; attempt <= MAX_HEALTH_RETRY_ATTEMPTS; attempt++) {
+    await triggerWwanRestart();
+    await delay(HEALTH_RETRY_DELAY_MS);
+
+    const recheckReaderOk = await isReaderHealthy();
+    const recheckInternetOk = await hasInternetConnectivity();
+
+    if (recheckReaderOk && recheckInternetOk) {
+      log(`Health check: recovered after attempt ${attempt} of ${MAX_HEALTH_RETRY_ATTEMPTS}.`);
+      if (readerIsDown) {
+        readerIsDown = false;
+        sendReaderHealthEmail(true);
+      }
+      writeHealthRestartCount(0);
+      return;
+    }
+
+    log(`Health check: still not healthy after attempt ${attempt} of ${MAX_HEALTH_RETRY_ATTEMPTS}.`);
+  }
+
+  if (!readerIsDown) {
+    readerIsDown = true;
+    logError(`Health check: still down after ${MAX_HEALTH_RETRY_ATTEMPTS} recovery attempts.`);
+    // Best-effort alert - if internet is genuinely the problem, this
+    // may not actually arrive, which is exactly why the bounded
+    // restart below exists as a fallback that doesn't depend on
+    // email working at all.
+    sendReaderHealthEmail(false);
+  }
+
+  // The lightweight fix genuinely wasn't enough. A full restart is a
+  // real, if riskier, option: it's the one thing that's reliably
+  // cleared this exact situation in the field, and it doesn't depend
+  // on internet already working (unlike the email alert above). It's
+  // deliberately bounded, not indefinite - a small number of chances,
+  // tracked durably across restarts, so a problem a reboot genuinely
+  // can't fix doesn't turn into an endless reboot loop.
+  const restartCount = await readHealthRestartCount();
+
+  if (restartCount < MAX_HEALTH_AUTO_RESTARTS) {
+    const newCount = restartCount + 1;
+    writeHealthRestartCount(newCount);
+    logError(
+      `Health check: attempting a full restart as a last resort ` +
+      `(attempt ${newCount} of ${MAX_HEALTH_AUTO_RESTARTS} allowed)...`
+    );
+    exec(
+      `shutdown /r /t 60 /c "Heartland: recovering from a health check failure"`,
+      (execErr) => {
+        if (execErr) {
+          logError("Health check: could not trigger a restart:", execErr.message);
+        }
+      }
+    );
+  } else {
+    logError(
+      `Health check: already attempted ${MAX_HEALTH_AUTO_RESTARTS} automatic ` +
+      `restarts without success - not trying again automatically. This ` +
+      `machine needs manual attention.`
+    );
+  }
+}
+
 
 setInterval(checkReaderHealth, READER_HEALTH_CHECK_INTERVAL_MS);
 
