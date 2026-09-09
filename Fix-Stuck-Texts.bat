@@ -7,6 +7,9 @@ echo This is the same fix that's been resolving stuck texts today.
 echo No need to run this as administrator - it's already authorized.
 echo.
 
+if not exist "C:\HeartlandData" mkdir "C:\HeartlandData"
+echo Manual (Fix-Stuck-Texts.bat) > "C:\HeartlandData\wwan-restart-source.txt"
+
 schtasks /run /tn "Heartland Restart WWAN Service" >nul 2>nul
 
 if %errorlevel%==0 (

@@ -483,13 +483,15 @@ function delay(ms) {
 
 function triggerWwanRestart() {
   return new Promise((resolve) => {
-    exec('schtasks /run /tn "Heartland Restart WWAN Service"', (execErr) => {
-      if (execErr) {
-        logError("Health check: could not trigger WWAN service restart:", execErr.message);
-      } else {
-        log("Health check: triggered an automatic WWAN service restart.");
-      }
-      resolve();
+    fs.writeFile("C:\\HeartlandData\\wwan-restart-source.txt", "Node health check", () => {
+      exec('schtasks /run /tn "Heartland Restart WWAN Service"', (execErr) => {
+        if (execErr) {
+          logError("Health check: could not trigger WWAN service restart:", execErr.message);
+        } else {
+          log("Health check: triggered an automatic WWAN service restart.");
+        }
+        resolve();
+      });
     });
   });
 }

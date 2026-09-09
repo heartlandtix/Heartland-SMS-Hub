@@ -23,6 +23,8 @@ if "%EXITCODE%"=="42" (
     echo just relaunching the program alone doesn't reset the
     echo underlying Windows service that may actually be stuck.
     echo.
+    if not exist "C:\HeartlandData" mkdir "C:\HeartlandData"
+    echo Program's own health check (exit code 42) > "C:\HeartlandData\wwan-restart-source.txt"
     schtasks /run /tn "Heartland Restart WWAN Service" >nul 2>nul
     set "WWAN_RETRY_COUNT=0"
     timeout /t 25 /nobreak >nul
@@ -42,6 +44,8 @@ if not "%EXITCODE%"=="0" (
         echo modem gets stuck. Attempting to restart that service now
         echo ^(attempt !WWAN_RETRY_COUNT! of %MAX_WWAN_RETRIES%^)...
         echo.
+        if not exist "C:\HeartlandData" mkdir "C:\HeartlandData"
+        echo C++ reader's own retry loop (attempt !WWAN_RETRY_COUNT! of %MAX_WWAN_RETRIES%) > "C:\HeartlandData\wwan-restart-source.txt"
         schtasks /run /tn "Heartland Restart WWAN Service" >nul 2>nul
         timeout /t 25 /nobreak >nul
         goto loop
