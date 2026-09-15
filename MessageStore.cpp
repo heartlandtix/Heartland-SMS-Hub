@@ -77,7 +77,19 @@ bool MessageStore::Open(const std::wstring& dbPath)
             (db_ ? Utf8ToWideLocal(sqlite3_errmsg(db_)) : L"unknown error");
         return false;
     }
-
+    // IMPORTANT: GetComputerNameW() commonly returns the device name
+    // all-uppercase, while the Node side's os.hostname() call (used by
+    // the Skylight cross-check) often preserves a different
+    // capitalization. This is DELIBERATE and should NOT be "fixed" to
+    // make the two match. In practice, this means a message's device
+    // name shows up in emails in a DIFFERENT case depending on which
+    // path caught it: uppercase (e.g. "RUSTY-WESTFIELD") means this
+    // program detected it live and normally; lowercase/mixed-case
+    // (e.g. "Rusty-Westfield") means it came through the Skylight
+    // cross-check safety net instead - i.e. this program missed it
+    // live, and Skylight's own record caught it afterward. This is
+    // used as an at-a-glance signal for how a message actually
+    // arrived, and is genuinely useful, not cosmetic.
     wchar_t nameBuffer[256]{};
     DWORD nameSize = 256;
     deviceId_ = GetComputerNameW(nameBuffer, &nameSize)

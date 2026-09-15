@@ -383,6 +383,18 @@ const READER_HEALTH_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const READER_HEALTH_CHECK_TIMEOUT_MS = 5000;
 const MAX_HEALTH_RETRY_ATTEMPTS = 5;
 const HEALTH_RETRY_DELAY_MS = 30 * 1000; // 30 seconds between attempts
+// IMPORTANT: os.hostname() often preserves a different capitalization
+// than the C++ reader's own GetComputerNameW() call does (which
+// commonly comes back all-uppercase). This is DELIBERATELY left as-is
+// - it's not a bug, and should not be "fixed" to make the two match.
+// In practice, this means a message's device name shows up in emails
+// in a DIFFERENT case depending on which path caught it: uppercase
+// (e.g. "RUSTY-WESTFIELD") means the C++ reader detected it live and
+// normally; lowercase/mixed-case (e.g. "Rusty-Westfield") means it
+// came through the Skylight cross-check safety net instead - i.e. the
+// reader missed it live, and Skylight's own record caught it
+// afterward. This is used as an at-a-glance signal for how a message
+// actually arrived, and is genuinely useful, not cosmetic.
 const deviceId = os.hostname();
 let readerIsDown = false;
 

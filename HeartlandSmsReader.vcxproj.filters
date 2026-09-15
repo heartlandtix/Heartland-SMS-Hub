@@ -2,9 +2,6 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="HeartlandSmsReader.cpp" />
-    <ClCompile Include="SmsService.cpp">
-      <Filter>Services</Filter>
-    </ClCompile>
     <ClCompile Include="PduDecoder.cpp">
       <Filter>Decoders</Filter>
     </ClCompile>
@@ -15,9 +12,6 @@
     <ClCompile Include="MessageStore.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="SmsService.h">
-      <Filter>Services</Filter>
-    </ClInclude>
     <ClInclude Include="PduDecoder.h">
       <Filter>Decoders</Filter>
     </ClInclude>
