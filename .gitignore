@@ -32,3 +32,5 @@ server/node_modules/
 *.zip
 
 Old-ChatGPT-Files/
+
+server/port-names.json

@@ -19,6 +19,36 @@ function safe(value) {
   return div.innerHTML;
 }
 
+// Parses the shared display timestamp format ("9/18/2026 9:57:25 AM")
+// into a real, comparable moment in time. This is needed because the
+// sort below previously compared timestamps as plain TEXT
+// (localeCompare), which is unreliable for this format specifically -
+// single-digit months/days/hours aren't zero-padded, so e.g.
+// "10:03:34 AM" sorts BEFORE "8:32:59 AM" as plain text (since "1" <
+// "8" as characters), even though 10:03 AM is actually later in the
+// day. Returns 0 (sorts to one end) for anything that doesn't match,
+// rather than throwing on an unexpected format.
+function parseTimestamp(value) {
+  const match = /^(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+):(\d+)\s*(AM|PM)$/i.exec((value || "").trim());
+  if (!match) return 0;
+
+  let [, month, day, year, hour, minute, second, ampm] = match;
+  hour = parseInt(hour, 10);
+  if (ampm.toUpperCase() === "PM" && hour !== 12) hour += 12;
+  if (ampm.toUpperCase() === "AM" && hour === 12) hour = 0;
+
+  const date = new Date(
+    parseInt(year, 10),
+    parseInt(month, 10) - 1,
+    parseInt(day, 10),
+    hour,
+    parseInt(minute, 10),
+    parseInt(second, 10)
+  );
+
+  return isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
 function messageKey(message) {
   return [
     message.type,
@@ -83,7 +113,11 @@ function combineMultipart(items) {
 
     base.index = Math.min(...parts.map(part => part.index));
     base.timestamp =
-      parts.map(part => part.timestamp).filter(Boolean).sort().at(-1) || "";
+      parts
+        .map(part => part.timestamp)
+        .filter(Boolean)
+        .sort((a, b) => parseTimestamp(a) - parseTimestamp(b))
+        .at(-1) || "";
     base.text = "";
 
     for (let partNumber = 1; partNumber <= base.total; partNumber++) {
@@ -130,13 +164,13 @@ function filteredMessages() {
   if (sort.value === "newest") {
     filtered.sort(
       (a, b) =>
-        (b.timestamp || "").localeCompare(a.timestamp || "") ||
+        parseTimestamp(b.timestamp) - parseTimestamp(a.timestamp) ||
         b.index - a.index
     );
   } else if (sort.value === "oldest") {
     filtered.sort(
       (a, b) =>
-        (a.timestamp || "").localeCompare(b.timestamp || "") ||
+        parseTimestamp(a.timestamp) - parseTimestamp(b.timestamp) ||
         a.index - b.index
     );
   } else {
