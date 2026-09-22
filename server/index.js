@@ -8,6 +8,29 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+// ---------------------------------------------------------------------
+// Global safety net.
+//
+// Added after a real incident: serialport-gsm's own internal response
+// parser threw an unguarded error (a regex match came back null, then
+// got indexed anyway) while handling a normal, expected reply from one
+// SIM - and because that throw happened deep inside the library's own
+// event-driven code, not inside a try/catch we control, it crashed the
+// ENTIRE Node process. That took down receiving on all 8 ports at
+// once, not just whatever triggered it.
+//
+// This is the real fix for THAT category of risk: no matter what
+// throws, from where, Node logs it and keeps running instead of
+// exiting. This is a genuine tradeoff, not a free lunch - continuing
+// after a truly unexpected error means the process could theoretically
+// be left in a slightly inconsistent state. But for this system, the
+// alternative (one bad response from one SIM silently killing
+// everyone's receiving until someone notices and restarts it by hand)
+// is clearly worse.
+process.on("uncaughtException", (error) => {
+  logError("UNCAUGHT EXCEPTION (Node kept running instead of crashing):", error && error.stack ? error.stack : error);
+});
+
 const app = express();
 const PORT = 3000;
 const SMS_READER_URL = "http://127.0.0.1:8080";
@@ -920,6 +943,67 @@ function getPortLabel(comPort) {
   return comPort;
 }
 
+// ---------------------------------------------------------------------
+// SIM-based naming (stable across COM port renumbering).
+//
+// Real problem this solves: Box4's COM port assignments have been
+// observed to change whenever a SIM is removed and reinserted, or
+// even sometimes just on its own between sessions - meaning
+// port-names.json's COM-based naming can silently point at the wrong
+// physical SIM after a card gets moved, with no error or warning at
+// all. That's a real risk to message identity, not just a cosmetic
+// inconvenience.
+//
+// The fix: identify each SIM by its own IMSI (a number permanently
+// tied to the SIM card itself, from the carrier - completely
+// unaffected by which COM port Windows happens to assign it this
+// session), looked up once per port at startup via a raw AT+CIMI
+// command. This file is keyed by IMSI instead of COM port, and once a
+// SIM's IMSI is in here, its name follows that physical card correctly
+// no matter which slot or COM number it ends up on.
+//
+// This is deliberately ADDITIVE, not a replacement: a SIM whose IMSI
+// isn't yet in this file (brand new card, or the IMSI lookup failed)
+// falls back to the existing COM-based label above, exactly like
+// before - nothing breaks, this only adds a more stable option on top
+// once you've had a chance to record each card's IMSI here.
+// ---------------------------------------------------------------------
+
+const SIM_NAMES_FILE = path.join(__dirname, "sim-names.json");
+const portImsis = {};
+
+function getSimLabel(comPort) {
+  const imsi = portImsis[comPort];
+  if (!imsi) return null;
+
+  try {
+    const raw = fs.readFileSync(SIM_NAMES_FILE, "utf8");
+    const names = JSON.parse(raw);
+    if (names[imsi] && names[imsi].trim()) {
+      return names[imsi].trim();
+    }
+  } catch (err) {
+    // Missing file, bad JSON, or this IMSI not listed yet - fall back
+    // to the COM-based label instead, handled by the caller.
+  }
+  return null;
+}
+
+// Extracts an IMSI (a run of 14-15 digits) from AT+CIMI's raw response.
+// The response is normally just the IMSI on its own line followed by
+// OK, but parsed defensively here rather than assuming an exact shape,
+// since this is exactly the kind of unverified-library-response
+// assumption that caused a real crash earlier tonight (though this
+// parsing is entirely our own code, not something buried inside the
+// library, so a mistake here is much safer - worst case it just fails
+// to find a match, it can't throw from deep inside someone else's
+// event handling the way that did).
+function extractImsi(rawResponse) {
+  const text = typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse || "");
+  const match = /\b(\d{14,15})\b/.exec(text);
+  return match ? match[1] : null;
+}
+
 function loadConfiguredPorts() {
   try {
     const raw = fs.readFileSync(PORT_NAMES_FILE, "utf8");
@@ -974,7 +1058,7 @@ function insertDirectPollerMessage(comPort, from, text, timestampIso) {
   // identifies who a message belongs to (one SIM per machine), a
   // modem-pool machine has many SIMs sharing one hostname - so the
   // meaningful identity here is the port/name, not the machine.
-  const deviceIdForPort = getPortLabel(comPort);
+  const deviceIdForPort = getSimLabel(comPort) || getPortLabel(comPort);
   // Content-based key (not a SIM storage index, which gets reused
   // after deletion) - matches the same dedup philosophy already used
   // elsewhere (comparisonKey), just inlined here since timestamps
@@ -1008,7 +1092,7 @@ function insertDirectPollerMessage(comPort, from, text, timestampIso) {
   });
 }
 
-function startModemOnPort(comPort) {
+function startModemOnPort(comPort, pollOffsetMs) {
   const modem = serialportgsm.Modem();
 
   const options = {
@@ -1049,6 +1133,23 @@ function startModemOnPort(comPort) {
     modem.initializeModem((result) => {
       if (result && result.status === "success") {
         log(`Direct poller (${comPort}): modem initialized, listening for new messages.`);
+
+        // Raw command, own parsing - deliberately NOT using a
+        // library-provided helper function here, since it was exactly
+        // that kind of automatic internal parsing (in getOwnNumber)
+        // that crashed the whole process once already tonight.
+        // executeCommand hands back the raw response and expects the
+        // caller to parse it, which keeps any mistake contained to our
+        // own code instead of inside the library's event handling.
+        modem.executeCommand("AT+CIMI", (cimiResult) => {
+          const imsi = extractImsi(cimiResult);
+          if (imsi) {
+            portImsis[comPort] = imsi;
+            log(`Direct poller (${comPort}): SIM IMSI is ${imsi}.`);
+          } else {
+            log(`Direct poller (${comPort}): could not read this SIM's IMSI - raw response: ${JSON.stringify(cimiResult)}`);
+          }
+        });
       } else {
         logError(`Direct poller (${comPort}): could not initialize modem:`, JSON.stringify(result));
       }
@@ -1100,8 +1201,35 @@ function startModemOnPort(comPort) {
   // works.
   const POLL_INTERVAL_MS = 3000;
 
-  setInterval(async () => {
-    modem.getSimInbox(async (result) => {
+  // TEMPORARY DIAGNOSTIC - logs every single poll result for COM11
+  // specifically (not just when a message is found), to help track
+  // down why it's gone quiet despite initializing normally. Safe to
+  // remove once COM11's issue is understood - this is deliberately
+  // scoped to one port only, not applied to all 8, to avoid flooding
+  // node.log under normal operation.
+  const VERBOSE_DEBUG_PORTS = ["COM11"];
+
+  // Staggered by pollOffsetMs (set per-port at startup below) so that
+  // not every port's AT-command burst hits at the exact same instant.
+  // Theory worth testing: even with each SIM slot separately powered,
+  // all 8 almost certainly share ONE physical USB-to-serial controller
+  // inside the box (there's only one USB cable to Kevin) - if every
+  // port's poll fires simultaneously every 3 seconds, that's 8
+  // simultaneous AT-command exchanges competing for one shared data
+  // path at once, which could plausibly cause responses to get
+  // corrupted, delayed, or crossed between ports as more are added -
+  // matching the observed "fine with a few ports active, flaky once
+  // more are added" pattern, rather than any single port being at
+  // fault. Spreading polls out over time, instead of bunching them all
+  // at once, is a direct, testable fix for exactly that kind of
+  // contention.
+  setTimeout(() => {
+    setInterval(async () => {
+      modem.getSimInbox(async (result) => {
+      if (VERBOSE_DEBUG_PORTS.includes(comPort)) {
+        log(`Direct poller (${comPort}) [DEBUG]: poll completed, raw result: ${JSON.stringify(result)}`);
+      }
+
       // Same defensive logging approach as onNewMessage above - the
       // library's docs don't spell out this result's exact shape
       // either, so the raw result is logged once per non-empty poll
@@ -1148,7 +1276,8 @@ function startModemOnPort(comPort) {
         })
       );
     });
-  }, POLL_INTERVAL_MS);
+    }, POLL_INTERVAL_MS);
+  }, pollOffsetMs);
 
   modemInstances[comPort] = modem;
 }
@@ -1158,7 +1287,9 @@ if (MODEM_PORTS.length === 0) {
 } else {
   log(`Direct poller: starting on ${MODEM_PORTS.length} configured port(s): ${MODEM_PORTS.join(", ")}`);
 
-  for (const comPort of MODEM_PORTS) {
-    startModemOnPort(comPort);
-  }
+  const staggerStepMs = Math.floor(3000 / Math.max(MODEM_PORTS.length, 1));
+
+  MODEM_PORTS.forEach((comPort, index) => {
+    startModemOnPort(comPort, index * staggerStepMs);
+  });
 }

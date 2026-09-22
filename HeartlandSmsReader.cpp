@@ -1176,6 +1176,28 @@ int wmain(int argc, wchar_t* argv[])
                         2, 2000, L"Health check"))
                 {
                     healthCheckFailureStreak = 0;
+
+                    // Silently catch up anything present on the SIM
+                    // but missing from our own database - this reuses
+                    // the same safe, duplicate-proof insert already
+                    // used at startup, just running it periodically
+                    // (every 2 minutes, using data the health check is
+                    // already fetching anyway) instead of only once.
+                    // This is a genuine, direct safety net for the
+                    // same kind of missed message Skylight's own
+                    // cross-check sometimes catches, so it still works
+                    // even on a machine running without Skylight at
+                    // all - confirmed necessary after a real message
+                    // was found missed on Eric with Skylight disabled.
+                    for (const auto& healthMsg : healthMessages)
+                    {
+                        DecodedSms healthDecoded = PduDecoder::Decode(healthMsg.pdu);
+                        messageStore.InsertMessage(
+                            healthMsg.index,
+                            healthMsg.status,
+                            healthMsg.pdu,
+                            healthDecoded);
+                    }
                 }
                 else
                 {
