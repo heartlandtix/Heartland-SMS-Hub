@@ -1119,10 +1119,12 @@ int wmain(int argc, wchar_t* argv[])
                << L"Press Q in this console to stop.\n";
 
     const ULONGLONG healthCheckIntervalMs = 2ULL * 60ULL * 1000ULL;
+    const ULONGLONG backfillIntervalMs = 30ULL * 1000ULL;
     const int maxHealthCheckFailures = 1;
     const int watchdogExitCode = 42;
 
     ULONGLONG lastHealthCheckTick = GetTickCount64();
+    ULONGLONG lastBackfillTick = GetTickCount64();
     int healthCheckFailureStreak = 0;
     bool watchdogTriggered = false;
 
@@ -1164,9 +1166,13 @@ int wmain(int argc, wchar_t* argv[])
         CComPtr<IMbnSms> changedSms;
         if (!statusSink->WaitForChange(500, changedSms))
         {
+            bool didHealthCheck = false;
+
             if (GetTickCount64() - lastHealthCheckTick >= healthCheckIntervalMs)
             {
                 lastHealthCheckTick = GetTickCount64();
+                lastBackfillTick = GetTickCount64();
+                didHealthCheck = true;
 
                 std::vector<SmsEventSink::RawMessage> healthMessages;
                 HRESULT healthStatus = E_PENDING;
@@ -1178,25 +1184,45 @@ int wmain(int argc, wchar_t* argv[])
                     healthCheckFailureStreak = 0;
 
                     // Silently catch up anything present on the SIM
-                    // but missing from our own database - this reuses
-                    // the same safe, duplicate-proof insert already
-                    // used at startup, just running it periodically
-                    // (every 2 minutes, using data the health check is
-                    // already fetching anyway) instead of only once.
-                    // This is a genuine, direct safety net for the
-                    // same kind of missed message Skylight's own
-                    // cross-check sometimes catches, so it still works
-                    // even on a machine running without Skylight at
-                    // all - confirmed necessary after a real message
-                    // was found missed on Eric with Skylight disabled.
+                    // but missing from our own database - reuses the
+                    // health check's own already-fetched data. Tagged
+                    // and shown live, same as the standalone backfill
+                    // below - see that block's comment for the full
+                    // reasoning.
+                    size_t healthBackfillCount = 0;
                     for (const auto& healthMsg : healthMessages)
                     {
+                        const std::wstring key = MessageKey(healthMsg);
+                        if (knownMessages.find(key) != knownMessages.end())
+                        {
+                            continue;
+                        }
+
                         DecodedSms healthDecoded = PduDecoder::Decode(healthMsg.pdu);
-                        messageStore.InsertMessage(
-                            healthMsg.index,
-                            healthMsg.status,
-                            healthMsg.pdu,
-                            healthDecoded);
+                        healthDecoded.text =
+                            L"[caught via periodic backfill] " + healthDecoded.text;
+
+                        if (messageStore.InsertMessage(
+                                healthMsg.index,
+                                healthMsg.status,
+                                healthMsg.pdu,
+                                healthDecoded))
+                        {
+                            knownMessages.insert(key);
+                            ++healthBackfillCount;
+                        }
+                    }
+
+                    if (healthBackfillCount > 0)
+                    {
+                        messages = healthMessages;
+                        {
+                            std::lock_guard<std::mutex> lock(messagesMutex);
+                            messagesJson = BuildMessagesJson(messages);
+                        }
+                        ++messagesVersion;
+                        std::wcout << L"Periodic backfill (via health check) caught "
+                                   << healthBackfillCount << L" message(s) missed by live detection.\n";
                     }
                 }
                 else
@@ -1215,6 +1241,79 @@ int wmain(int argc, wchar_t* argv[])
                         break;
                     }
                 }
+            }
+
+            // Independent, more frequent safety net - runs every 30
+            // seconds (unless a health check JUST covered this same
+            // moment), using a single lightweight read rather than
+            // the full multi-attempt health check treatment, since a
+            // single miss here just means it'll be caught on the next
+            // pass 30 seconds later anyway. This is specifically for
+            // catching messages missed by live detection (the same
+            // kind of race a program like Skylight sometimes catches
+            // for us) faster than the slower 2-minute health check
+            // alone would - confirmed necessary after a real message
+            // was found missed on Eric with Skylight disabled.
+            //
+            // Anything caught this way is tagged directly in its text
+            // ("[caught via periodic backfill]") and pushed into the
+            // live web view immediately, not just silently saved to
+            // the database - so it's visible right away, both on the
+            // web inbox and in the eventual email, clearly marked as
+            // not having come through live detection.
+            if (!didHealthCheck &&
+                GetTickCount64() - lastBackfillTick >= backfillIntervalMs)
+            {
+                lastBackfillTick = GetTickCount64();
+
+                std::vector<SmsEventSink::RawMessage> backfillMessages;
+                HRESULT backfillStatus = E_PENDING;
+
+                if (ReadMessagesWithRetries(
+                        sms, smsConnectionPoint, backfillMessages, backfillStatus,
+                        1, 0, L"Periodic backfill"))
+                {
+                    size_t backfillCount = 0;
+                    for (const auto& backfillMsg : backfillMessages)
+                    {
+                        const std::wstring key = MessageKey(backfillMsg);
+                        if (knownMessages.find(key) != knownMessages.end())
+                        {
+                            continue;
+                        }
+
+                        DecodedSms backfillDecoded = PduDecoder::Decode(backfillMsg.pdu);
+                        backfillDecoded.text =
+                            L"[caught via periodic backfill] " + backfillDecoded.text;
+
+                        if (messageStore.InsertMessage(
+                                backfillMsg.index,
+                                backfillMsg.status,
+                                backfillMsg.pdu,
+                                backfillDecoded))
+                        {
+                            knownMessages.insert(key);
+                            ++backfillCount;
+                        }
+                    }
+
+                    if (backfillCount > 0)
+                    {
+                        messages = backfillMessages;
+                        {
+                            std::lock_guard<std::mutex> lock(messagesMutex);
+                            messagesJson = BuildMessagesJson(messages);
+                        }
+                        ++messagesVersion;
+                        std::wcout << L"Periodic backfill caught " << backfillCount
+                                   << L" message(s) missed by live detection.\n";
+                    }
+                }
+                // A single failed attempt here isn't logged loudly or
+                // treated as a health problem - the real health check
+                // will catch a genuinely stuck connection on its own,
+                // slower cycle. This is just a lightweight, frequent,
+                // best-effort scan layered on top.
             }
 
             continue;
