@@ -576,7 +576,7 @@ function writeHealthRestartCount(count) {
   fs.writeFile(HEALTH_RESTART_COUNT_FILE, String(count), () => {});
 }
 
-async function checkReaderHealth() {
+async function runHealthCheckCycle() {
   const readerOk = await isReaderHealthy();
   const internetOk = await hasInternetConnectivity();
 
@@ -664,6 +664,29 @@ async function checkReaderHealth() {
   }
 }
 
+// A full cycle (one check plus up to 5 rounds of restart / 30-second
+// wait / recheck) can take about 3 minutes, but the timer below fires
+// every 2 minutes. Without this guard, a long outage made cycles pile
+// up on top of each other: on Seamus that meant roughly one WWAN
+// service restart every 20 seconds, which kept the modem service down
+// most of the time and could burn through the bounded full-restart
+// allowance in a single outage. A new cycle now simply waits until the
+// previous one has finished.
+let healthCheckRunning = false;
+
+async function checkReaderHealth() {
+  if (healthCheckRunning) {
+    log("Health check: previous cycle still running - skipping this one.");
+    return;
+  }
+
+  healthCheckRunning = true;
+  try {
+    await runHealthCheckCycle();
+  } finally {
+    healthCheckRunning = false;
+  }
+}
 
 setInterval(checkReaderHealth, READER_HEALTH_CHECK_INTERVAL_MS);
 
