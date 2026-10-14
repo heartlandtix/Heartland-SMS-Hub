@@ -1251,7 +1251,7 @@ function startModemOnPort(comPort, pollOffsetMs) {
   // remove once COM11's issue is understood - this is deliberately
   // scoped to one port only, not applied to all 8, to avoid flooding
   // node.log under normal operation.
-  const VERBOSE_DEBUG_PORTS = ["COM11"];
+  const VERBOSE_DEBUG_PORTS = [];
 
   // Staggered by pollOffsetMs (set per-port at startup below) so that
   // not every port's AT-command burst hits at the exact same instant.
