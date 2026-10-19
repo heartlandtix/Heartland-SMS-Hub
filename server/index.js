@@ -470,7 +470,8 @@ function sendReaderHealthEmail(recovered, attempt = 1) {
       `automatic recovery attempts. This could mean the reader program ` +
       `itself is stuck, or that this machine has lost internet ` +
       `connectivity entirely - either way, it likely needs manual ` +
-      `attention (Chrome Remote Desktop, if reachable, or in person).`;
+      `attention (Chrome Remote Desktop, if reachable, or in person).` +
+      (modemFaultNote ? `\n\n${modemFaultNote}` : "");
 
   mailTransporter.sendMail(
     { from: emailFrom, to: emailTo, subject, text: body },
@@ -506,7 +507,7 @@ function sendReaderHealthEmail(recovered, attempt = 1) {
   );
 }
 
-const { exec } = require("child_process");
+const { exec, execFile, spawn } = require("child_process");
 
 // Checks real internet connectivity, not just whether the reader's own
 // local page loads - a reader can be running perfectly fine locally
@@ -576,11 +577,206 @@ function writeHealthRestartCount(count) {
   fs.writeFile(HEALTH_RESTART_COUNT_FILE, String(count), () => {});
 }
 
+// ---------------------------------------------------------------
+// Modem fault detection (Device Manager "Code 43" / "Code 45")
+// ---------------------------------------------------------------
+// Found in the field on Seamus (43), Alec (45) and Eric (43): Windows
+// stops the cellular modem itself, and neither a program restart nor a
+// normal PC restart clears it - only a full shutdown has. Nothing in
+// the health check could tell that apart from an ordinary outage, so a
+// machine could sit down until someone happened to dig into Device
+// Manager. This block only DETECTS and INFORMS - it never restarts,
+// shuts down or changes anything on the machine:
+//   - writes a plain line to node.log,
+//   - adds the same line to the existing "NOT responding" email, and
+//   - shows an always-on-top message box on the desktop (so it works
+//     even with no internet at all) explaining the fix. The person at
+//     the machine can close it with OK; it then stays closed until the
+//     modem recovers and faults again.
+// It only runs when a health check has ALREADY found a problem (never
+// on healthy cycles), and any failure inside it is logged and ignored
+// so it can never interfere with the health check itself.
+const MODEM_POPUP_SCRIPT = path.join(__dirname, "..", "Modem-Fault-Popup.vbs");
+
+// Read-only Device Manager query. Matches the modem by type ("Generic
+// Mobile Broadband Adapter") with the product name as a backup, not by
+// name alone. Deliberately contains no double quotes (it is passed as
+// a single command-line argument).
+const MODEM_CHECK_PS =
+  "$d = @(Get-PnpDevice -Class Net -ErrorAction Stop | " +
+  "Where-Object { $_.Description -like '*Mobile Broadband*' -or $_.FriendlyName -like '*Snapdragon*' } | " +
+  "ForEach-Object { [pscustomobject]@{ Name = [string]$_.FriendlyName; Present = [bool]$_.Present; " +
+  "Status = [string]$_.Status; Problem = [string]$_.ConfigManagerErrorCode } }); " +
+  "ConvertTo-Json -InputObject $d -Compress";
+
+const MODEM_PROBLEM_CODES = {
+  CM_PROB_FAILED_POST_START: "43",
+  CM_PROB_PHANTOM: "45",
+};
+
+let modemFaultNote = "";          // non-empty while a fault is active
+let modemFaultPopup = null;       // the running popup process, if any
+let modemFaultDismissed = false;  // someone clicked OK during this fault
+let modemCheckRunning = false;
+
+// Decides what a list of matching modem entries means. Pure function
+// (no side effects) so it can be tested on its own.
+//   "none"  - no modem entry at all (e.g. a machine with no built-in
+//             modem): never an alert
+//   "ok"    - at least one modem is present and has no problem
+//   "fault" - a modem exists but none is working. A present modem with
+//             an error is reported with its code ("43", "45" or
+//             "other"); a modem that is not present at all is "missing"
+function evaluateModemDevices(devices) {
+  if (!Array.isArray(devices) || devices.length === 0) {
+    return { state: "none" };
+  }
+
+  const present = devices.filter((d) => d && d.Present === true);
+  if (present.some((d) => d.Problem === "CM_PROB_NONE")) {
+    return { state: "ok" };
+  }
+
+  const faulted = present.find((d) => d.Problem && d.Problem !== "CM_PROB_NONE");
+  if (faulted) {
+    return {
+      state: "fault",
+      kind: MODEM_PROBLEM_CODES[faulted.Problem] || "other",
+      problem: faulted.Problem,
+      name: faulted.Name,
+    };
+  }
+
+  return { state: "fault", kind: "missing", problem: "not present", name: devices[0].Name };
+}
+
+function buildModemFaultNote(result) {
+  let what;
+  if (result.kind === "43") {
+    what = "Windows has stopped the modem because it reported an error (Device Manager Code 43)";
+  } else if (result.kind === "missing") {
+    what = "Windows can no longer see the modem (usually Device Manager Code 45)";
+  } else {
+    what = `the modem is reporting a problem (${result.problem})`;
+  }
+  return (
+    `MODEM FAULT: ${what}. A normal restart does not clear this. ` +
+    `Fix: hold Shift and click Shut down, wait about 30 seconds, then ` +
+    `power on. If it comes back, shut down, reseat the SIM, and power on.`
+  );
+}
+
+function readModemState() {
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", MODEM_CHECK_PS],
+      { windowsHide: true, timeout: 30000 },
+      (err, stdout) => {
+        if (err) {
+          resolve({ state: "unknown", error: err.message });
+          return;
+        }
+        try {
+          let parsed = JSON.parse(String(stdout).trim() || "[]");
+          if (!Array.isArray(parsed)) parsed = [parsed];
+          resolve(evaluateModemDevices(parsed));
+        } catch (parseErr) {
+          resolve({ state: "unknown", error: `could not read result: ${parseErr.message}` });
+        }
+      }
+    );
+  });
+}
+
+function showModemFaultPopup(kind) {
+  if (modemFaultPopup || modemFaultDismissed) {
+    return;
+  }
+  if (!fs.existsSync(MODEM_POPUP_SCRIPT)) {
+    logError(`Modem check: popup script not found at ${MODEM_POPUP_SCRIPT} - skipping the on-screen message.`);
+    return;
+  }
+  try {
+    const child = spawn("wscript.exe", ["//nologo", MODEM_POPUP_SCRIPT, kind], {
+      stdio: "ignore",
+    });
+    modemFaultPopup = child;
+    child.on("error", (spawnErr) => {
+      logError("Modem check: could not show the on-screen message:", spawnErr.message);
+      if (modemFaultPopup === child) modemFaultPopup = null;
+    });
+    child.on("exit", () => {
+      // Exiting on its own means someone clicked OK. (When WE close it
+      // on recovery, modemFaultPopup is already cleared first, so this
+      // does not count as a dismissal.)
+      if (modemFaultPopup === child) {
+        modemFaultPopup = null;
+        modemFaultDismissed = true;
+        log("Modem check: on-screen message closed by the user; it will not reappear until the modem recovers and faults again.");
+      }
+    });
+  } catch (err) {
+    logError("Modem check: could not show the on-screen message:", err.message);
+  }
+}
+
+// Called whenever the modem is fine, there is no modem, or the whole
+// health check passes: closes any message still on screen and re-arms
+// it for the next fault.
+function clearModemFaultState() {
+  if (modemFaultNote) {
+    log("Modem check: modem fault cleared.");
+  }
+  modemFaultNote = "";
+  modemFaultDismissed = false;
+  const popup = modemFaultPopup;
+  modemFaultPopup = null;
+  if (popup) {
+    try {
+      popup.kill();
+    } catch (err) {
+      // Already gone - nothing to do.
+    }
+  }
+}
+
+// Not awaited by the health check, and never throws.
+async function handleModemFaultCheck() {
+  if (modemCheckRunning) {
+    return;
+  }
+  modemCheckRunning = true;
+  try {
+    const result = await readModemState();
+    if (result.state === "fault") {
+      if (!modemFaultNote) {
+        logError(
+          `Modem check: FAULT detected - ${result.problem}` +
+          `${result.name ? ` (${result.name})` : ""}. A normal restart will not clear this; ` +
+          `it needs a full shutdown (Shift + Shut down).`
+        );
+      }
+      modemFaultNote = buildModemFaultNote(result);
+      showModemFaultPopup(result.kind);
+    } else if (result.state === "ok" || result.state === "none") {
+      clearModemFaultState();
+    } else {
+      logError(`Modem check: could not determine modem state (${result.error}) - leaving things as they are.`);
+    }
+  } catch (err) {
+    logError("Modem check: unexpected error (ignored):", err.message);
+  } finally {
+    modemCheckRunning = false;
+  }
+}
+
 async function runHealthCheckCycle() {
   const readerOk = await isReaderHealthy();
   const internetOk = await hasInternetConnectivity();
 
   if (readerOk && internetOk) {
+    clearModemFaultState();
     if (readerIsDown) {
       readerIsDown = false;
       log("Health check: back online.");
@@ -601,6 +797,10 @@ async function runHealthCheckCycle() {
     `internet ${internetOk ? "ok" : "NOT reachable"}). Beginning recovery attempts...`
   );
 
+  // Check (without waiting) whether the cause is a faulted modem, so the
+  // person at the machine and the alert email can say so.
+  handleModemFaultCheck();
+
   for (let attempt = 1; attempt <= MAX_HEALTH_RETRY_ATTEMPTS; attempt++) {
     await triggerWwanRestart();
     await delay(HEALTH_RETRY_DELAY_MS);
@@ -610,6 +810,7 @@ async function runHealthCheckCycle() {
 
     if (recheckReaderOk && recheckInternetOk) {
       log(`Health check: recovered after attempt ${attempt} of ${MAX_HEALTH_RETRY_ATTEMPTS}.`);
+      clearModemFaultState();
       if (readerIsDown) {
         readerIsDown = false;
         sendReaderHealthEmail(true);
