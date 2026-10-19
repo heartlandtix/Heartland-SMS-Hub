@@ -240,6 +240,65 @@ if (emailAuthUser && emailFrom && emailAppPassword && emailTo) {
 const MAX_EMAIL_ATTEMPTS = 5;
 const EMAIL_RETRY_DELAY_MS = 10000;
 
+// ---------------------------------------------------------------
+// One-time code highlighting
+// ---------------------------------------------------------------
+// Gmail only pulls a code to the top of an email for senders it
+// already trusts (Google itself, big sites), so forwarded texts never
+// get that treatment. This does the same thing ourselves: when an
+// INCOMING text looks like it contains a verification code, the code
+// is shown large at the top of the email body. The subject line is
+// NOT changed, and the original message text is always still
+// included, untouched.
+//
+// Deliberately strict, so ordinary texts are not mistaken for codes:
+// a 4-8 digit number (or 3+3 digits like 123-456) must come right
+// after a word like "code", "OTP", "passcode", "PIN" or "verification"
+// (optionally with "is" or a colon), or be followed by "is your...",
+// or follow "use"/"enter"; Google's "G-123456" style is also
+// recognized. Things like "zip code 50309" or "promo code 12345" are
+// skipped. Anything that doesn't clearly match is left alone, and if
+// anything at all goes wrong the email goes out exactly as before.
+function extractVerificationCode(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > 2000) {
+    return null;
+  }
+
+  const googleStyle = text.match(/\bG-(\d{6})\b/);
+  if (googleStyle) {
+    return `G-${googleStyle[1]}`;
+  }
+
+  const NOT_A_LOGIN_CODE = /(zip|postal|area|promo|coupon|discount|tracking|order|invoice|gift|country)\s*$/i;
+  const NUM = "(\\d{4,8}|\\d{3}[- ]\\d{3})";
+  const patterns = [
+    new RegExp(`\\b(?:one[- ]time\\s+)?(?:verification|security|confirmation|login|authentication|access|sign[- ]?in)?\\s*(?:code|otp|passcode|pin)\\b\\s*(?:is|was|=|:|-|#)?\\s*:?\\s*${NUM}\\b`, "i"),
+    new RegExp(`\\b(?:verification|one[- ]time|temporary)\\s+(?:password|number)\\b\\s*(?:is|=|:|-|#)?\\s*:?\\s*${NUM}\\b`, "i"),
+    new RegExp(`\\b${NUM}\\s+is\\s+your\\b`, "i"),
+    new RegExp(`\\b(?:use|enter)\\s+(?:code\\s+)?${NUM}\\b`, "i"),
+  ];
+
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (!m) continue;
+    // m[1] is the code itself; check the words just before the match
+    // so "zip code 50309" and similar are not picked up.
+    const before = text.slice(Math.max(0, m.index - 12), m.index);
+    if (NOT_A_LOGIN_CODE.test(before)) continue;
+    return m[1];
+  }
+
+  return null;
+}
+
+function escapeEmailHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function sendMessageEmail(message, attempt = 1) {
   if (!mailTransporter) {
     return;
@@ -260,12 +319,37 @@ function sendMessageEmail(message, attempt = 1) {
     `Time: ${message.timestamp_original || "Unknown"}\n\n` +
     `${message.text || message.error || "(no text)"}\n`;
 
+  // If this looks like a one-time code, show it large at the top of the
+  // body (the subject is left as is). Any failure here falls back to
+  // the plain email above, unchanged.
+  let finalBody = body;
+  let htmlBody = null;
+  try {
+    const code = isIncoming ? extractVerificationCode(message.text) : null;
+    if (code) {
+      finalBody = `YOUR CODE: ${code}\n\n${body}`;
+      htmlBody =
+        `<div style="font-family:Arial,Helvetica,sans-serif;">` +
+        `<div style="font-size:14px;margin-bottom:8px;">Code detected in this message</div>` +
+        `<div style="display:inline-block;background-color:#e8eaed;color:#202124;font-size:32px;` +
+        `font-weight:bold;letter-spacing:6px;padding:8px 16px;border-radius:8px;">${escapeEmailHtml(code)}</div>` +
+        `<hr style="margin:16px 0;">` +
+        `<pre style="font-family:Consolas,Menlo,monospace;font-size:13px;white-space:pre-wrap;">${escapeEmailHtml(body)}</pre>` +
+        `</div>`;
+    }
+  } catch (codeErr) {
+    logError("Code highlighting skipped (sending the email normally):", codeErr.message);
+    finalBody = body;
+    htmlBody = null;
+  }
+
   mailTransporter.sendMail(
     {
       from: emailFrom,
       to: emailTo,
       subject,
-      text: body
+      text: finalBody,
+      ...(htmlBody ? { html: htmlBody } : {})
     },
     (error, info) => {
       if (error) {
